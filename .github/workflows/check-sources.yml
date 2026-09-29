@@ -1,0 +1,25 @@
+name: Check data sources
+
+# Probes every live data source the map calls from the browser, with a browser
+# Origin header, and writes a status table to the run summary. Report-only: an
+# outage upstream is visible here but never fails the build.
+on:
+  push:
+    paths:
+      - 'scripts/check-sources.sh'
+      - '.github/workflows/check-sources.yml'
+  schedule:
+    - cron: '17 14 * * 1'   # Mondays, 14:17 UTC
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Probe data sources
+        run: bash scripts/check-sources.sh
