@@ -286,6 +286,8 @@ const pageErrors = [];
 page.on('pageerror', e => pageErrors.push(String(e)));
 page.on('console', msg => { if (msg.type() === 'error' && !/net::|Failed to load resource/.test(msg.text())) pageErrors.push('console: ' + msg.text()); });
 
+// Evaluate callbacks must not return Leaflet objects (setView/closePopup
+// return the map): serializing that graph of ~30k markers breaks the call.
 await page.route('**/*', async route => {
   const req = route.request();
   const res = handle(req.url(), req.method(), req.postData());
@@ -327,7 +329,7 @@ const legendTitle = await page.locator('.legend-block[data-layer="demographics"]
 assert(/Population density/.test(legendTitle), 'legend shows default metric');
 
 console.log('· demographics (tract level)');
-await page.evaluate(() => WAMAP.map.setView([47.6, -122.4], 11, { animate: false }));
+await page.evaluate(() => { WAMAP.map.setView([47.6, -122.4], 11, { animate: false }); });
 await page.waitForTimeout(1600);
 status = await page.locator('#card-demographics .status-line').textContent();
 assert(/tracts loaded/.test(status), 'tracts loaded at z11: "' + status.trim() + '"');
@@ -367,7 +369,7 @@ for (const c of await page.evaluate(() => WAMAP.CONFIG.AMENITIES.map(a => a.id))
 const ph = readData('amenities/pharmacy.json').rows[0];
 await page.evaluate(() => { document.getElementById('amen-pharmacy').click(); });
 await page.waitForTimeout(1200);
-await page.evaluate(([lat, lon]) => WAMAP.map.setView([lat, lon], 18, { animate: false }), [ph[0], ph[1]]);
+await page.evaluate(([lat, lon]) => { WAMAP.map.setView([lat, lon], 18, { animate: false }); }, [ph[0], ph[1]]);
 await page.waitForTimeout(1200);
 const phPopup = await page.evaluate(([lat, lon]) => {
   let html = null;
@@ -396,7 +398,7 @@ const agencySite = (readData('transit/agencies.json').agencies['metro transit'] 
 assert(/Northgate - Downtown/.test(routePopup), 'route popup falls back to route_desc when the long name is empty');
 assert(agencySite && routePopup.includes('href="' + agencySite + '"') && /Agency website/.test(routePopup), 'route popup links the agency website (' + agencySite + ')');
 assert(/040\.html/.test(routePopup) && /Route schedule/.test(routePopup), 'route popup links the GTFS route_url schedule page');
-await page.evaluate(() => WAMAP.map.closePopup());
+await page.evaluate(() => { WAMAP.map.closePopup(); });
 
 console.log('· crime');
 await setToggle('card-crime', true);
@@ -424,7 +426,7 @@ const agencyPopup = await page.evaluate(() => {
   return html || '';
 });
 assert(/per 1,000/.test(agencyPopup) && /WASPC/.test(agencyPopup), 'agency popup shows rates and the WASPC source');
-await page.evaluate(() => WAMAP.map.closePopup());
+await page.evaluate(() => { WAMAP.map.closePopup(); });
 const total = await page.locator('.crime-total').textContent();
 assert(/incidents in view/.test(total), 'viewport totals rendered: "' + total.trim() + '"');
 // Count check on Seattle alone: switch every other incident feed off.
@@ -467,7 +469,7 @@ await page.waitForTimeout(600);
 assert(await page.locator('.leaflet-heatmap-layer, canvas.leaflet-heatmap-layer').count() > 0, 'heat map mode renders');
 
 console.log('· drive time');
-await page.evaluate(() => WAMAP.driveTime.setOrigin(47.6, -122.45, 'Test origin'));
+await page.evaluate(() => { WAMAP.driveTime.setOrigin(47.6, -122.45, 'Test origin'); });
 await page.waitForTimeout(2200);
 assert(await page.locator('#card-drivetime .card-toggle input').isChecked(), 'drive-time card auto-enabled');
 assert(/Drive time/.test(await page.locator('.legend-block[data-layer="drivetime"]').textContent()), 'drive-time legend visible');
@@ -490,7 +492,7 @@ assert(await page.locator('.search-pin').count() === 1, 'search marker placed');
 assert(/Drive times from here/.test(await page.locator('.leaflet-popup').textContent()), 'search popup has drive-time action');
 
 console.log('· pins');
-await page.evaluate(() => WAMAP.map.closePopup());
+await page.evaluate(() => { WAMAP.map.closePopup(); });
 // Turn the data layers off first: transit lines and crime dots are
 // interactive, and a click that lands on one opens its popup instead of
 // reaching the map, which would make this test order-dependent.

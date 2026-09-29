@@ -152,7 +152,10 @@
         chip.querySelector('.chip-count').textContent =
           city.status === 'ok' ? city.incidents.length.toLocaleString() + (city.truncated ? '+' : '')
           : city.status === 'busy' ? '…' : city.status === 'err' ? 'unavailable' : '';
-        chip.title = city.cfg.note + (city.error ? ' — ' + city.error : '');
+        const f = city.file;
+        chip.title = city.cfg.note +
+          (f && f.fetched ? ` ${f.rows.length.toLocaleString()} of ${f.fetched.toLocaleString()} reports from the last year could be placed on the map.` : '') +
+          (city.error ? ' — ' + city.error : '');
       }
     }
     function onCategoriesChanged() { renderIncidents(); renderAgencies(); }

@@ -46,7 +46,10 @@ const OSM = {
       '["amenity"="doctors"]', '["healthcare"="doctor"]',
       '["healthcare"="centre"]'
     ],
-    kind: t => (t.amenity === 'hospital' || t.healthcare === 'hospital') ? 'Hospital'
+    // Features mis-tagged as hospitals or clinics that are not medical care sites.
+    exclude: /adult family home|fire (&|and) rescue|fire station|fire dep|veterinar|animal|\bpet\b|nursing home|assisted living|senior living|memory care/i,
+    kind: t => (t.amenity === 'hospital' || t.healthcare === 'hospital')
+      ? (/emergency|\bER\b/.test(t.name || '') && !/hospital|medical center/i.test(t.name || '') ? 'Emergency department' : 'Hospital')
       : /urgent/i.test(`${t['healthcare:speciality'] || ''} ${t.name || ''} ${t.emergency || ''}`) ? 'Urgent care'
       : (t.amenity === 'doctors' || t.healthcare === 'doctor') ? "Doctor's office"
       : 'Clinic'
@@ -124,6 +127,7 @@ async function osmCategory(id) {
     const kind = spec.kind(t);
     const name = t.name || t.brand || t.operator || null;
     if (!name && !(spec.keepUnnamed && spec.keepUnnamed(t))) continue;
+    if (spec.exclude && name && spec.exclude.test(name)) continue;
     rows.push({
       lat: round(lat), lon: round(lon), name: name || kind, kind, addr: addrOf(t),
       ref: e.type[0] + e.id, web: osmWeb(t),
@@ -181,16 +185,44 @@ async function cmsLayer(layerId, kindOf, extraFields = '') {
   for (const f of features) {
     const p = pt(f); if (!p) continue;
     const a = f.attributes;
-    rows.push({ ...p, name: titleCase(a.FACILITY_NM), kind: kindOf(a),
+    rows.push({ ...p, ccn: a.CMS_PROVIDER_NUM, name: titleCase(a.FACILITY_NM), kind: kindOf(a),
       addr: joinAddr(a.CMS_PROVIDER_ADDRESS, a.CMS_PROVIDER_CITY),
       info: a.TOT_BED_CT > 0 ? `${a.TOT_BED_CT} beds (CMS)` : a.OPERATING_ROOM_CT > 0 ? `${a.OPERATING_ROOM_CT} operating rooms` : null });
   }
   return rows;
 }
+/**
+ * CMS Hospital General Information: the hospitals currently enrolled in
+ * Medicare (acute care, critical access, children's, psychiatric, VA, DoD),
+ * keyed by CMS certification number. The Provider of Services layer still
+ * carries long-closed providers ("Shadel Hosp", "Ranier State School Hosp"),
+ * so it is only trusted for CCNs that appear here.
+ */
+async function cmsCurrentHospitals() {
+  const d = await fetchJSON(`https://data.cms.gov/provider-data/api/1/datastore/query/xubh-q36u/0?${qs({
+    'conditions[0][property]': 'state', 'conditions[0][value]': 'WA', 'conditions[0][operator]': '=', limit: 500
+  })}`, {}, { retries: 2, timeoutMs: 60000 });
+  const byCcn = new Map((d.results || []).map(r => [String(r.facility_id), r]));
+  if (byCcn.size < 60) throw new Error(`only ${byCcn.size} WA hospitals in CMS Hospital General Information`);
+  return byCcn;
+}
+const HGI_KIND = {
+  'acute care hospitals': 'Hospital (acute care)', 'critical access hospitals': 'Critical access hospital',
+  psychiatric: 'Psychiatric hospital', childrens: "Children's hospital",
+  'acute care - veterans administration': 'VA hospital (medical center)', 'acute care - department of defense': 'Military hospital'
+};
 async function cmsHospitals() {
-  const kindOf = a => CMS_HOSP_KIND[String(a.CMS_PROVIDER_CAT_SUB_TYP_DESC || '').toLowerCase()] || 'Hospital';
-  const rows = [...await cmsLayer(0, kindOf, 'TOT_BED_CT'), ...await cmsLayer(1, kindOf, 'TOT_BED_CT')];
-  if (rows.length < 80) throw new Error(`only ${rows.length} CMS hospitals`);
+  const current = await cmsCurrentHospitals();
+  const all = [...await cmsLayer(0, () => 'Hospital', 'TOT_BED_CT'), ...await cmsLayer(1, () => 'Hospital', 'TOT_BED_CT')];
+  const rows = [];
+  for (const r of all) {
+    const h = current.get(String(r.ccn));
+    if (!h) continue;
+    rows.push({ ...r, name: titleCase(h.facility_name), kind: HGI_KIND[String(h.hospital_type || '').toLowerCase()] || 'Hospital',
+      info: [r.info, h.emergency_services === 'Yes' ? 'Emergency services' : null].filter(Boolean).join(' · ') || null });
+  }
+  log(`CMS hospitals: ${rows.length} of ${all.length} POS records are current (HGI lists ${current.size})`);
+  if (rows.length < 50) throw new Error(`only ${rows.length} current CMS hospitals`);
   return rows;
 }
 async function cmsClinics() {
@@ -412,6 +444,7 @@ async function helmsPharmacies() {
   });
   const now = Date.now();
   const rows = [];
+  log(`HELMS pharmacy records: ${features.length}, with a point: ${features.filter(f => pt(f)).length}, unexpired: ${features.filter(f => !f.attributes.Expiration_Date || f.attributes.Expiration_Date >= now - 90 * 86400000).length}`);
   for (const f of features) {
     const a = f.attributes;
     if (a.Expiration_Date && a.Expiration_Date < now - 90 * 86400000) continue; // lapsed licence
@@ -658,7 +691,7 @@ function sameName(a, b) {
  * share a building or a campus (a clinic beside a hospital, two restaurants
  * in one mall) are kept.
  */
-function merge(sourceRows, radius, classOf = () => 'x', classRadius = {}) {
+function merge(sourceRows, radius, classOf = () => 'x', classRadius = {}, nameRadius = {}) {
   const kept = [];
   const grid = new Map();
   const cellDeg = 0.01; // ~1.1 km x 0.75 km here: the 3x3 neighbourhood covers every radius used
@@ -669,15 +702,24 @@ function merge(sourceRows, radius, classOf = () => 'x', classRadius = {}) {
     for (let i = -1; i <= 1; i++) for (let j = -1; j <= 1; j++) out.push(...(grid.get(`${a + i}:${b + j}`) || []));
     return out;
   };
+  // 5x5 cells for name radii beyond the 3x3 neighbourhood (hospital campuses).
+  const farNeighbours = p => {
+    const [a, b] = cell(p).split(':').map(Number);
+    const out = [];
+    for (let i = -2; i <= 2; i++) for (let j = -2; j <= 2; j++) out.push(...(grid.get(`${a + i}:${b + j}`) || []));
+    return out;
+  };
   const counts = [];
   sourceRows.forEach((rows, si) => {
     let n = 0;
     for (const p of rows) {
       const cls = classOf(p);
       const r2 = classRadius[cls] != null ? classRadius[cls] : radius;
-      const dup = neighbours(p).some(q => {
+      const rn = nameRadius[cls] != null ? nameRadius[cls] : Math.max(radius, r2);
+      const near = rn > 1000 ? farNeighbours(p) : neighbours(p);
+      const dup = near.some(q => {
         const d = metres(p, q);
-        return (d < Math.max(radius, r2) && sameName(p.name, q.name)) || (q.src !== si && q.cls === cls && d < r2);
+        return (d < rn && sameName(p.name, q.name)) || (q.src !== si && q.cls === cls && d < r2);
       });
       if (dup) continue;
       const rec = { ...p, src: si, cls };
@@ -707,9 +749,12 @@ const CATEGORIES = {
     OSM_SRC('colleges', { fallbackOnly: true })] },
   health: {
     radius: 150,
-    classOf: r => /hospital|medical center/i.test(r.kind) ? 'hospital' : /surgery/i.test(r.kind) ? 'asc'
+    classOf: r => /hospital|medical center|emergency/i.test(r.kind) ? 'hospital' : /surgery/i.test(r.kind) ? 'asc'
       : /doctor/i.test(r.kind) ? 'doctor' : /vet center/i.test(r.kind) ? 'vetctr' : 'clinic',
     classRadius: { hospital: 350, clinic: 40, asc: 40, doctor: 25, vetctr: 40 },
+    // A hospital campus's OSM centre can sit well away from the licensed
+    // address point; the same name within 1.5 km is the same hospital.
+    nameRadius: { hospital: 1500 },
     sources: [
       { id: 'doh', name: 'WA Department of Health licensed hospitals', url: 'https://geo.wa.gov/datasets/626cb2ca35c64ea1a2ac502c573e3ec9', fn: dohHospitals },
       { id: 'cms-hosp', name: 'CMS Provider of Services: hospitals & critical access hospitals', url: 'https://data.hrsa.gov/data/download', fn: cmsHospitals },
@@ -774,7 +819,7 @@ export async function buildAmenities(outDir, only) {
       }
     }
     if (!got.length) { summary[id] = { error: 'every source failed', sources: info }; continue; }
-    const { kept, counts } = merge(got.map(g => g.rows), cat.radius, cat.classOf, cat.classRadius);
+    const { kept, counts } = merge(got.map(g => g.rows), cat.radius, cat.classOf, cat.classRadius, cat.nameRadius);
     got.forEach((g, i) => { info.find(x => x.id === g.s.id).kept = counts[i]; });
     const kinds = [...new Set(kept.map(r => r.kind))].sort();
     const kindIdx = new Map(kinds.map((k, i) => [k, i]));

@@ -40,6 +40,15 @@ const CATS = Object.keys(WASPC);
 
 const key = s => String(s || '').toLowerCase().replace(/&/g, 'and').replace(/[^a-z]/g, '');
 
+// Agencies that serve no city of their own: placed on the place they patrol.
+const SPECIAL_PLACES = [
+  [/^university of washington/i, 'Seattle'], [/^wsu vancouver/i, 'Vancouver'], [/^washington state university/i, 'Pullman'],
+  [/^central washington university/i, 'Ellensburg'], [/^eastern washington university/i, 'Cheney'],
+  [/^western washington university/i, 'Bellingham'], [/^evergreen state college/i, 'Olympia'], [/^port of seattle/i, 'SeaTac'],
+  [/^muckleshoot/i, 'Muckleshoot'], [/^tulalip/i, 'Tulalip Bay'], [/^swinomish/i, 'Swinomish Village'],
+  [/^chehalis tribal/i, 'Chehalis Village'], [/^spokane tribal/i, 'Wellpinit'], [/^snohomish auto theft/i, 'Everett']
+];
+
 /** Census place internal points for Washington, newest Gazetteer vintage. */
 async function waPlaces() {
   const now = new Date().getUTCFullYear();
@@ -47,12 +56,15 @@ async function waPlaces() {
     try {
       const text = await fetchText(`https://www2.census.gov/geo/docs/maps-data/data/gazetteer/${y}_Gazetteer/${y}_gaz_place_53.txt`, {}, { retries: 1, timeoutMs: 60000 });
       const lines = text.split(/\r?\n/).filter(Boolean);
-      const head = lines.shift().split('\t').map(h => h.trim());
+      const head = lines.shift().split('\t').map(h => h.replace(/^\uFEFF/, '').trim().toUpperCase());
       const col = n => head.indexOf(n);
+      // A missing vintage can come back as an HTML page with status 200.
+      if (col('NAME') < 0 || col('INTPTLAT') < 0 || col('INTPTLONG') < 0) throw new Error(`unexpected header: ${head.slice(0, 6).join(',')}`);
       const places = [];
       for (const line of lines) {
         const c = line.split('\t').map(v => v.trim());
         const name = c[col('NAME')];
+        if (!name) continue;
         const lsad = c[col('LSAD')];
         const base = name.replace(/ (city|town|CDP|village)$/i, '');
         places.push({ name, base, k: key(base), incorporated: lsad !== '57', lat: +c[col('INTPTLAT')], lon: +c[col('INTPTLONG')] });
@@ -122,6 +134,7 @@ async function buildAgencies(outDir) {
       counties[county] = [num(r.population), total, prevT, ...counts];
       continue;
     }
+    if (/^state(wide)? totals?$/i.test(r.location)) continue;
     let type = 'other', pt = null, where = '';
     const city = r.location.match(/^(.*?)\s+(Police Department|Police Dept\.?|Department of Public Safety|Public Safety Department|Marshal'?s Office)$/i);
     const sheriff = r.location.match(/^(.*?)\s+County Sheriff'?s? Office$/i);
@@ -130,8 +143,14 @@ async function buildAgencies(outDir) {
       pt = countyPt.get(sheriff[1].toUpperCase()) || countyPt.get(county);
       where = 'county';
     } else if (city && !/tribal|tribe|nation|university|college|port of/i.test(city[1])) {
-      const p = findPlace(city[1]);
+      // "Moxee City Police Department" serves the place named "Moxee".
+      const p = findPlace(city[1]) || findPlace(city[1].replace(/\s+city$/i, ''));
       if (p) { type = 'city'; pt = { lat: p.lat, lon: p.lon }; where = 'place'; }
+    }
+    if (!pt) {
+      const special = SPECIAL_PLACES.find(([re]) => re.test(r.location));
+      const p = special && placeByKey.get(key(special[1]));
+      if (p) { pt = { lat: p.lat, lon: p.lon }; where = 'special'; }
     }
     if (!pt) {
       const f = fbiByName.get(key(r.location));
@@ -185,7 +204,9 @@ async function writeIncidents(outDir, id, meta, incidents) {
 /** "26400 Block 180TH AVE SE" -> "26400 180TH AVE SE" (the block's first address). */
 const blockToStreet = s => String(s || '').replace(/\s+Block\s+(of\s+)?/i, ' ').replace(/^(\d+)XX\b/i, '$100').replace(/\s+/g, ' ').trim();
 
-async function geocodeIncidents(list, cityDefault) {
+// [south, west, north, east]: a match outside it is a geocoding miss (a
+// street name that also exists in another town), not a real location.
+async function geocodeIncidents(list, cityDefault, bbox) {
   const uniq = new Map();
   for (const i of list) {
     const street = blockToStreet(i.addr);
@@ -199,7 +220,7 @@ async function geocodeIncidents(list, cityDefault) {
   const out = [];
   for (const i of list) {
     const c = i.gkey && byKey.get(i.gkey);
-    if (c && inWA(c.lat, c.lon)) out.push({ ...i, lat: c.lat, lon: c.lon });
+    if (c && c.lat >= bbox[0] && c.lat <= bbox[2] && c.lon >= bbox[1] && c.lon <= bbox[3]) out.push({ ...i, lat: c.lat, lon: c.lon });
   }
   log(`geocoded ${out.length}/${list.length} incidents (${uniq.size} distinct addresses)`);
   return out;
@@ -216,7 +237,9 @@ async function buildKCSO(outDir) {
     offense: r.nibrs_code_name, addr: r.block_address, city: r.city, zip: r.zip
   }));
   if (list.length < 5000) throw new Error(`only ${list.length} KCSO offenses in the last year`);
-  const located = await geocodeIncidents(list, '');
+  // The Sheriff's transit police also patrol Sound Transit lines outside King
+  // County, so the box spans the Snohomish-King-Pierce service area.
+  const located = await geocodeIncidents(list, '', [46.95, -122.75, 48.05, -121.0]);
   if (located.length < list.length * 0.5) throw new Error(`only ${located.length}/${list.length} KCSO incidents geocoded`);
   return writeIncidents(outDir, 'kcso', {
     label: 'King County Sheriff', source: "King County Sheriff's Office offense reports (NIBRS), block addresses geocoded by the U.S. Census Bureau",
@@ -233,13 +256,14 @@ async function buildAuburn(outDir) {
     $select: 'casenumber,offense,reported,address', $where: `reported >= '${since}'`, $order: 'reported'
   });
   const list = rows.filter(r => r.offense && r.reported && !AUBURN_NON_CRIME.test(r.offense.trim()))
-    .map(r => ({ t: Date.parse(r.reported), offense: r.offense.trim().replace(/^[A-Z ]+$/, s => s[0] + s.slice(1).toLowerCase()), addr: r.address, city: 'Auburn' }));
+    // The feed mixes "Theft" and "THEFT"; unify, but keep acronyms such as DUI.
+    .map(r => ({ t: Date.parse(r.reported), offense: r.offense.trim().replace(/^[A-Z ]{5,}$/, s => s[0] + s.slice(1).toLowerCase()), addr: r.address, city: 'Auburn' }));
   if (list.length < 2000) throw new Error(`only ${list.length} Auburn crime reports in the last year`);
-  const located = await geocodeIncidents(list, 'Auburn');
+  const located = await geocodeIncidents(list, 'Auburn', [47.2, -122.4, 47.4, -122.05]);
   if (located.length < list.length * 0.5) throw new Error(`only ${located.length}/${list.length} Auburn reports geocoded`);
   return writeIncidents(outDir, 'auburn', {
     label: 'Auburn', source: 'City of Auburn police case reports (non-criminal case types removed), addresses geocoded by the U.S. Census Bureau',
-    url: 'https://data.auburnwa.gov/Public-Safety/Crimes/8g4u-7zzy', fetched: rows.length
+    url: 'https://data.auburnwa.gov/Public-Safety/Crimes/8g4u-7zzy', fetched: list.length
   }, located);
 }
 

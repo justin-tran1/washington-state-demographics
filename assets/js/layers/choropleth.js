@@ -44,19 +44,20 @@
       return this.countiesPromise;
     },
 
-    tractsStatewide: null, tractsPromise: null,
+    tractsStatewide: null, tractsPromise: null, tractsFileFailed: false,
     async loadTractsInView(map) {
-      // Statewide file: loaded once, then every tract is available.
-      if (!this.tractsStatewide) {
+      // Statewide file: loaded once, then every tract is available. A failed
+      // load is not retried on every pan: TIGERweb serves the rest of the session.
+      if (!this.tractsStatewide && !this.tractsFileFailed) {
         if (!this.tractsPromise) {
           this.tractsPromise = U.fetchJSON(CFG.TIGERWEB.prebuilt.tract, { timeout: 60000, retries: 1 }).then(fc => {
             if (!fc || !fc.features || fc.features.length < 1000) throw new Error('incomplete tract file');
             for (const f of fc.features) this.tractCache.set(f.properties.GEOID, f);
             this.tractsStatewide = true;
           });
-          this.tractsPromise.catch(() => { this.tractsPromise = null; });
+          this.tractsPromise.catch(() => { this.tractsPromise = null; this.tractsFileFailed = true; });
         }
-        try { await this.tractsPromise; } catch (e) { /* fall back to TIGERweb for this view */ }
+        try { await this.tractsPromise; } catch (e) { /* fall back to TIGERweb */ }
       }
       if (this.tractsStatewide) return this.tractCache;
       const bounds = map.getBounds().pad(0.25);
