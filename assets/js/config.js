@@ -303,53 +303,72 @@
   };
 
   // --------------------------------------------------------------- overpass
+  // Only the transit layer's fallback still queries Overpass live. The other
+  // public mirrors (kumi.systems, private.coffee) stopped answering in 2026.
   const OVERPASS = {
-    endpoints: [
-      'https://overpass-api.de/api/interpreter',
-      'https://overpass.kumi.systems/api/interpreter',
-      'https://overpass.private.coffee/api/interpreter'
-    ],
+    endpoints: ['https://overpass-api.de/api/interpreter'],
     timeoutS: 40
   };
 
   // -------------------------------------------------------------- amenities
-  // source 'osm'  -> Overpass selectors (applied as nwr[...](bbox))
-  // source 'nces' -> NCES EDGE point services with OSM fallback
+  // One statewide file per category, pre-built by the "Build map data"
+  // GitHub Action (scripts/build-data/amenities.mjs). `featured` kinds are
+  // drawn larger and never clustered; `kindEmoji` picks a marker per kind.
+  const AMENITY_DATA_DIR = 'data/amenities/';
   const AMENITIES = [
-    { id: 'schools', label: 'Schools (K-12)', emoji: '🏫',  colorToken: 'schools', minZoom: 11, cap: 900,
-      source: 'nces', ncesKind: 'k12',
-      osm: ['["amenity"="school"]', '["amenity"="kindergarten"]'] },
-    { id: 'colleges', label: 'Colleges & universities', emoji: '🎓',  colorToken: 'colleges', minZoom: 9, cap: 500,
-      source: 'nces', ncesKind: 'postsecondary',
-      osm: ['["amenity"="college"]', '["amenity"="university"]'] },
-    { id: 'grocery', label: 'Grocery & supermarkets', emoji: '🛒',  colorToken: 'grocery', minZoom: 12, cap: 800,
-      source: 'osm', osm: ['["shop"~"^(supermarket|grocery|greengrocer|convenience|health_food)$"]'] },
-    { id: 'restaurants', label: 'Restaurants & cafes', emoji: '🍽️',  colorToken: 'restaurants', minZoom: 14, cap: 1200,
-      source: 'osm', osm: ['["amenity"~"^(restaurant|cafe|fast_food)$"]'] },
-    { id: 'retail', label: 'Retail & shopping', emoji: '🛍️',  colorToken: 'retail', minZoom: 14, cap: 1200,
-      source: 'osm', osm: ['["shop"~"^(mall|department_store|clothes|shoes|electronics|furniture|doityourself|hardware|sports|variety_store|general|gift|jewelry|beauty|books|toys|pet)$"]'] },
-    { id: 'pharmacy', label: 'Pharmacies', emoji: '💊',  colorToken: 'pharmacy', minZoom: 12, cap: 500,
-      source: 'osm', osm: ['["amenity"="pharmacy"]', '["shop"="chemist"]', '["healthcare"="pharmacy"]'] },
-    { id: 'health', label: 'Hospitals & clinics', emoji: '🏥',  colorToken: 'health', minZoom: 9, cap: 600,
-      source: 'osm', osm: ['["amenity"~"^(hospital|clinic)$"]', '["healthcare"~"^(hospital|clinic)$"]'] },
-    { id: 'banks', label: 'Banks & credit unions', emoji: '🏦',  colorToken: 'banks', minZoom: 13, cap: 500,
-      source: 'osm', osm: ['["amenity"="bank"]'] },
-    { id: 'fuel', label: 'Fuel & EV charging', emoji: '⛽',  colorToken: 'fuel', minZoom: 12, cap: 700,
-      source: 'osm', osm: ['["amenity"="fuel"]', '["amenity"="charging_station"]'] },
-    { id: 'parks', label: 'Parks & playgrounds', emoji: '🌳',  colorToken: 'parks', minZoom: 12, cap: 900,
-      source: 'osm', osm: ['["leisure"~"^(park|playground)$"]'] }
+    { id: 'schools', label: 'Schools (K-12)', emoji: '🏫', colorToken: 'schools' },
+    { id: 'colleges', label: 'Colleges & universities', emoji: '🎓', colorToken: 'colleges' },
+    { id: 'grocery', label: 'Grocery & supermarkets', emoji: '🛒', colorToken: 'grocery' },
+    { id: 'restaurants', label: 'Restaurants & cafes', emoji: '🍽️', colorToken: 'restaurants',
+      kindEmoji: [[/cafe|coffee/i, '☕']] },
+    { id: 'retail', label: 'Retail & shopping', emoji: '🛍️', colorToken: 'retail' },
+    { id: 'pharmacy', label: 'Pharmacies', emoji: '💊', colorToken: 'pharmacy' },
+    { id: 'health', label: 'Hospitals & clinics', emoji: '🏥', colorToken: 'health',
+      featured: /hospital|emergency/i, featuredLabel: 'hospitals',
+      kindEmoji: [[/hospital|emergency/i, '🏥'], [/./, '🩺']] },
+    { id: 'banks', label: 'Banks & credit unions', emoji: '🏦', colorToken: 'banks' },
+    { id: 'fuel', label: 'Fuel & EV charging', emoji: '⛽', colorToken: 'fuel',
+      kindEmoji: [[/EV|charging/i, '🔌']] },
+    { id: 'parks', label: 'Parks & playgrounds', emoji: '🌳', colorToken: 'parks' }
   ];
-
-  const NCES = {
-    k12Folder: 'https://nces.ed.gov/opengis/rest/services/K12_School_Locations',
-    postsecFolder: 'https://nces.ed.gov/opengis/rest/services/Postsecondary_School_Locations',
-    k12Match: /^EDGE_GEOCODE_(PUBLICSCH|PRIVATESCH)_(\d{4})$/i,
-    postsecMatch: /^EDGE_GEOCODE_POSTSECONDARYSCH_(\d{4})$/i
-  };
+  const AMENITIES_DEFAULT_ON = ['schools', 'grocery', 'health'];
 
   // ---------------------------------------------------------------- transit
   const TRANSIT = {
     wsdotService: 'https://data.wsdot.wa.gov/arcgis/rest/services/Shared/TransitData/FeatureServer',
+    // Agency websites and per-route schedule pages, read from every agency's
+    // GTFS feed (agency.txt / routes.txt) by scripts/build-data/transit.mjs.
+    agencyData: 'data/transit/agencies.json',
+    // Fallback when that file is missing or an agency is not in it:
+    // [pattern tested against the agency name, official website].
+    agencyLinks: [
+      [/king county metro|^metro transit|kcm\b/i, 'https://kingcounty.gov/en/dept/metro'],
+      [/water taxi/i, 'https://kingcounty.gov/en/dept/metro/travel-options/water-taxi'],
+      [/sound transit/i, 'https://www.soundtransit.org'],
+      [/community transit/i, 'https://www.communitytransit.org'],
+      [/everett transit/i, 'https://everetttransit.org'],
+      [/pierce transit/i, 'https://www.piercetransit.org'],
+      [/intercity transit/i, 'https://www.intercitytransit.com'],
+      [/kitsap transit/i, 'https://www.kitsaptransit.com'],
+      [/spokane transit|\bsta\b/i, 'https://www.spokanetransit.com'],
+      [/c-?tran\b/i, 'https://www.c-tran.com'],
+      [/ben franklin/i, 'https://www.bft.org'],
+      [/whatcom|\bwta\b/i, 'https://www.ridewta.com'],
+      [/skagit transit/i, 'https://www.skagittransit.org'],
+      [/island transit/i, 'https://www.islandtransit.org'],
+      [/link transit/i, 'https://www.linktransit.com'],
+      [/valley transit/i, 'https://www.valleytransit.com'],
+      [/mason transit/i, 'https://www.masontransit.org'],
+      [/jefferson transit/i, 'https://jeffersontransit.com'],
+      [/clallam transit/i, 'https://www.clallamtransit.com'],
+      [/grays harbor/i, 'https://www.ghtransit.com'],
+      [/twin transit/i, 'https://twintransit.org'],
+      [/seattle (center )?monorail/i, 'https://www.seattlemonorail.com'],
+      [/seattle streetcar/i, 'https://www.seattle.gov/transportation/getting-around/transit/streetcar'],
+      [/washington state ferries|\bwsf\b/i, 'https://wsdot.wa.gov/travel/washington-state-ferries'],
+      [/amtrak/i, 'https://www.amtrakcascades.com']
+    ],
+    ferryWebsite: 'https://wsdot.wa.gov/travel/washington-state-ferries',
     ferryService: 'https://data.wsdot.wa.gov/arcgis/rest/services/Shared/FerryRoutes/MapServer',
     routeLayerName: /route/i,
     stopLayerName: /stop/i,
@@ -498,7 +517,7 @@
 
   WAMAP.CONFIG = {
     PALETTE, MAP, BASEMAPS, BASEMAP_GROUPS, LABEL_LAYERS, CENSUS, TIGERWEB, DEMO_METRICS, INSURANCE_METRICS,
-    GEOCODE, OVERPASS, AMENITIES, NCES, TRANSIT, CRIME, ISOCHRONE, SOURCES,
+    GEOCODE, OVERPASS, AMENITIES, AMENITIES_DEFAULT_ON, AMENITY_DATA_DIR, TRANSIT, CRIME, ISOCHRONE, SOURCES,
     SQMI_PER_SQM
   };
 })();

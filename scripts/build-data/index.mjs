@@ -7,11 +7,15 @@
 
 import { step, writeJSON, readJSON, log } from './lib.mjs';
 import { buildACS } from './acs.mjs';
+import { buildAmenities } from './amenities.mjs';
+import { buildTransit } from './transit.mjs';
 
 const OUT = new URL('../../data', import.meta.url).pathname;
 
 const STEPS = {
-  acs: () => buildACS(OUT)
+  acs: () => buildACS(OUT),
+  amenities: () => buildAmenities(OUT),
+  transit: () => buildTransit(OUT)
 };
 
 const wanted = process.argv.slice(2).length ? process.argv.slice(2) : Object.keys(STEPS);

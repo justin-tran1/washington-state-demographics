@@ -119,6 +119,37 @@ export async function overpass(ql, { timeoutMs = 300000 } = {}) {
   throw lastErr;
 }
 
+/**
+ * Geocode addresses with the Census Bureau's keyless batch geocoder.
+ * rows: [{ id, street, city, state, zip }] -> Map(id -> { lat, lon, exact }).
+ * Sent in chunks well under the 10,000-row limit so one slow chunk can be
+ * retried without redoing everything; unmatched rows are simply absent.
+ */
+export async function geocodeBatch(rows, { chunk = 2500 } = {}) {
+  const out = new Map();
+  const esc = v => `"${String(v == null ? '' : v).replace(/"/g, "'").replace(/[\r\n]+/g, ' ')}"`;
+  for (let i = 0; i < rows.length; i += chunk) {
+    const part = rows.slice(i, i + chunk);
+    const csv = part.map(r => [r.id, r.street, r.city, r.state, r.zip].map(esc).join(',')).join('\n');
+    const fd = new FormData();
+    fd.append('benchmark', 'Public_AR_Current');
+    fd.append('addressFile', new Blob([csv], { type: 'text/csv' }), 'addresses.csv');
+    const res = await fetchRetry('https://geocoding.geo.census.gov/geocoder/locations/addressbatch',
+      { method: 'POST', body: fd }, { retries: 3, timeoutMs: 600000 });
+    const text = await res.text();
+    if (!res.ok) throw new Error(`Census batch geocoder HTTP ${res.status}: ${text.slice(0, 160)}`);
+    // "id","input","Match","Exact","matched address","lon,lat","tigerline id","side"
+    for (const line of text.split(/\r?\n/)) {
+      const cols = [...line.matchAll(/"([^"]*)"/g)].map(m => m[1]);
+      if (cols.length < 6 || cols[2] !== 'Match') continue;
+      const [lon, lat] = cols[5].split(',').map(Number);
+      if (isFinite(lat) && isFinite(lon)) out.set(cols[0], { lat, lon, exact: cols[3] === 'Exact' });
+    }
+    log(`geocoded ${Math.min(i + chunk, rows.length)}/${rows.length} (${out.size} matched)`);
+  }
+  return out;
+}
+
 /** Statewide Overpass area clause for Washington. */
 export const WA_AREA = 'area["ISO3166-2"="US-WA"][admin_level=4]->.wa;';
 

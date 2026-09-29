@@ -33,6 +33,55 @@
     return Object.assign({}, m, { color: U.theme.colors().transit[m.token] });
   }
 
+  // ---- agency links -------------------------------------------------------
+  // Same normalisation as scripts/build-data/transit.mjs, so names from the
+  // WSDOT route layer and from each agency's GTFS agency.txt line up.
+  const normAgency = s => String(s || '').toLowerCase()
+    .replace(/&/g, 'and').replace(/[^a-z0-9]+/g, ' ').replace(/\b(the|inc|llc)\b/g, '').replace(/\s+/g, ' ').trim();
+  const safeUrl = u => (/^https?:\/\/[^\s"'<>]+$/i.test(u || '') ? u : null);
+  const links = { data: null, promise: null };
+  function loadLinks() {
+    if (!links.promise) {
+      links.promise = U.fetchJSON(CFG.TRANSIT.agencyData, { timeout: 30000, retries: 1 })
+        .then(d => { links.data = d && d.agencies ? d : { agencies: {}, routes: {} }; })
+        .catch(() => { links.data = { agencies: {}, routes: {} }; });
+    }
+    return links.promise;
+  }
+  /** { name, url, key } for an agency name, or null. */
+  function agencyInfo(name) {
+    const key = normAgency(name);
+    if (!key) return null;
+    const A = (links.data && links.data.agencies) || {};
+    let hit = A[key] && A[key].url ? A[key] : null;
+    if (!hit && key.length >= 4) {
+      // "King County Metro" vs "King County Metro Transit": containment match.
+      const k2 = Object.keys(A).find(k => A[k].url && k.length >= 4 && (k.includes(key) || key.includes(k)));
+      if (k2) hit = Object.assign({ key: k2 }, A[k2]);
+    }
+    if (!hit) {
+      const cur = CFG.TRANSIT.agencyLinks.find(([re]) => re.test(name));
+      if (cur) hit = { name, url: cur[1] };
+    }
+    if (!hit || !safeUrl(hit.url)) return null;
+    return { name: hit.name || name, url: hit.url, key: hit.key || key };
+  }
+  /** Agency name for a WSDOT stop/route id such as "KCM_12345". */
+  function agencyForId(id) {
+    const pre = String(id || '').split('_')[0];
+    const P = (links.data && links.data.prefixes) || {};
+    const A = (links.data && links.data.agencies) || {};
+    const key = P[pre];
+    return key && A[key] ? A[key].name : '';
+  }
+  function agencyHTML(name) {
+    if (!name) return '';
+    const a = agencyInfo(name);
+    return a
+      ? `<div>Agency: <a href="${U.escapeHTML(a.url)}" target="_blank" rel="noopener">${U.escapeHTML(name)}</a></div>`
+      : `<div>Agency: ${U.escapeHTML(name)}</div>`;
+  }
+
   WAMAP.createTransit = function (opts) {
     const { map, card } = opts;
     const renderer = L.canvas({ padding: 0.3 });
@@ -109,13 +158,16 @@
           type: findField(rInfo.fields, [/^route_?type$/i, /route_?type/i, /^mode$/i]),
           shortName: findField(rInfo.fields, [/^route_?short_?name$/i, /short_?name/i]),
           longName: findField(rInfo.fields, [/^route_?long_?name$/i, /long_?name/i, /^route_?name$/i]),
-          agency: findField(rInfo.fields, [/^agency_?name$/i, /agency/i])
+          desc: findField(rInfo.fields, [/^route_?desc$/i]),
+          agency: findField(rInfo.fields, [/^agency_?name$/i, /agency_?name/i, /^agency$/i, /agency/i]),
+          url: findField(rInfo.fields, [/^route_?url$/i, /route_?url/i])
         };
         let stopFields = null;
         if (stopsUrl) {
           const sInfo = await U.arcgis.layerInfo(stopsUrl);
           stopFields = {
             name: findField(sInfo.fields, [/^stop_?name$/i, /stop_?name/i, /^name$/i]),
+            id: findField(sInfo.fields, [/^stop_?id$/i]),
             agency: findField(sInfo.fields, [/^agency_?name$/i, /agency/i]),
             freq: findField(sInfo.fields, [/freq.*(level|class|cat)/i, /frequen/i]) // WSDOT frequent-transit study
           };
@@ -137,11 +189,21 @@
       const t = normalizeRouteType(rf.type ? props[rf.type] : (props.route_type != null ? props.route_type : props.route));
       const m = modeStyle(t);
       const short = rf.shortName ? props[rf.shortName] : (props.ref || props.route_short_name);
-      const long = rf.longName ? props[rf.longName] : (props.name || props.route_long_name);
-      const agency = rf.agency ? props[rf.agency] : (props.operator || props.agency_name);
+      const long = (rf.longName && props[rf.longName]) || (rf.desc && props[rf.desc]) ||
+        (rf.longName ? null : (props.name || props.route_long_name));
+      const agencyName = rf.agency ? props[rf.agency] : (props.operator || props.network || props.agency_name);
+      const agency = agencyName ? agencyInfo(agencyName) : null;
+      // GTFS route_url: the agency's own schedule page for this route.
+      let raw = rf.url ? props[rf.url] : (props.route_url || props.website || props.url);
+      if (raw && !/^https?:/i.test(raw) && /^[\w.-]+\.[a-z]{2,}(\/|$)/i.test(raw)) raw = 'https://' + raw;
+      const schedule = safeUrl(raw);
+      const link = (href, text) => `<div>🔗 <a href="${U.escapeHTML(href)}" target="_blank" rel="noopener">${text}</a></div>`;
       return `<div class="popup-poi"><h3>${U.escapeHTML([short, long].filter(Boolean).join(' — ') || m.label)}</h3>
         <div class="popup-cat"><span class="mode-line" style="background:${m.color}"></span> ${U.escapeHTML(m.label)}</div>
-        ${agency ? `<div>Agency: ${U.escapeHTML(agency)}</div>` : ''}</div>`;
+        ${agencyName ? `<div>Agency: ${U.escapeHTML(agencyName)}</div>` : ''}
+        ${agency ? link(agency.url, 'Agency website') : ''}
+        ${schedule ? link(schedule, 'Route schedule &amp; map') : ''}
+        </div>`;
     }
     function addRouteFeatures(features, fieldsSpec) {
       routesLayer.clearLayers();
@@ -155,7 +217,8 @@
           return { color: m.color, weight: m.weight, opacity: 0.8, dashArray: m.dash || null };
         },
         onEachFeature: (f, lyr) => {
-          lyr.bindPopup(routePopup(f.properties || {}, fieldsSpec), { maxWidth: 300 });
+          // Rendered when opened, so the agency-link file has had time to load.
+          lyr.bindPopup(() => routePopup(f.properties || {}, fieldsSpec), { maxWidth: 300 });
           lyr.on('mouseover', () => lyr.setStyle({ weight: (lyr.options.weight || 2) + 2, opacity: 1 }));
           lyr.on('mouseout', () => gj.resetStyle(lyr));
         }
@@ -221,11 +284,12 @@
         const [lon, lat] = f.geometry.coordinates;
         const p = f.properties || {};
         const name = (w.stopFields && w.stopFields.name && p[w.stopFields.name]) || 'Transit stop';
-        const agency = (w.stopFields && w.stopFields.agency && p[w.stopFields.agency]) || '';
+        const stopId = w.stopFields && w.stopFields.id ? p[w.stopFields.id] : null;
+        const agencyField = (w.stopFields && w.stopFields.agency && p[w.stopFields.agency]) || '';
         const freq = w.stopFields && w.stopFields.freq && p[w.stopFields.freq] != null ? p[w.stopFields.freq] : '';
-        markers.push(L.marker([lat, lon], { icon: stopIcon() }).bindPopup(
+        markers.push(L.marker([lat, lon], { icon: stopIcon() }).bindPopup(() =>
           `<div class="popup-poi"><h3>${U.escapeHTML(name)}</h3>
-           <div class="popup-cat">🚏 Transit stop</div>${agency ? `<div>Agency: ${U.escapeHTML(agency)}</div>` : ''}
+           <div class="popup-cat">🚏 Transit stop</div>${agencyHTML(agencyField || agencyForId(stopId))}
            ${freq !== '' ? `<div>Service frequency: ${U.escapeHTML(String(freq))}</div>` : ''}
            <div class="popup-src">Source: WSDOT statewide GTFS</div></div>`, { maxWidth: 280 }));
       }
@@ -272,6 +336,7 @@
             const name = p.ROUTE || p.RouteName || p.Route_Name || p.NAME || p.Name || 'Ferry route';
             lyr2.bindPopup(`<div class="popup-poi"><h3>${U.escapeHTML(String(name))}</h3>
               <div class="popup-cat"><span class="mode-line" style="background:${m.color}"></span> Washington State Ferries</div>
+              <div>🔗 <a href="${CFG.TRANSIT.ferryWebsite}" target="_blank" rel="noopener">Schedules &amp; sailings (WSDOT)</a></div>
               <div class="popup-src">Source: WSDOT Ferry Routes</div></div>`);
           }
         }));
@@ -351,7 +416,7 @@
       setEnabled(on) {
         if (on === state.enabled) return;
         state.enabled = on;
-        if (on) { applyVisibility(); refresh(true); }
+        if (on) { loadLinks(); applyVisibility(); refresh(true); }
         else {
           token++;
           applyVisibility();

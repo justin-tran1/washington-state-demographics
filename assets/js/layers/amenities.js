@@ -1,7 +1,10 @@
 /* Washington Explorer — amenities layer.
- * Schools/colleges come from NCES EDGE point services (authoritative federal
- * school locations, newest school year auto-selected); commercial amenities
- * come from OpenStreetMap via Overpass, fetched live for the current view.
+ * Every category is one statewide file under data/amenities/, pre-built by
+ * scripts/build-data/amenities.mjs from authoritative registries (CMS/HRSA
+ * facilities, WA DOH hospitals, FDIC branches, USDA SNAP retailers, NREL
+ * stations, NCES schools) merged with OpenStreetMap. A category's file is
+ * loaded once, the first time it is switched on, so nothing is capped per
+ * view or hidden until some zoom level.
  */
 (function () {
   'use strict';
@@ -9,20 +12,24 @@
   const CFG = WAMAP.CONFIG;
   const U = WAMAP.util;
 
+  const OSM_TYPES = { n: 'node', w: 'way', r: 'relation' };
+
   WAMAP.createAmenities = function (opts) {
     const { map, card } = opts;
     const cluster = L.markerClusterGroup({
       chunkedLoading: true, maxClusterRadius: 46, disableClusteringAtZoom: 17,
       spiderfyOnMaxZoom: true, showCoverageOnHover: false
     });
+    // "Featured" kinds (hospitals) are few and important, so they are never
+    // folded into clusters: every one stays visible at statewide zoom.
+    const featuredLayer = L.layerGroup();
 
-    const state = {
-      enabled: false,
-      cats: new Map(), // id -> {cfg, on, markers: Map(uid->marker), fetched: [LatLngBounds], busy, note}
-      nces: { resolved: null, promise: null, failed: false }
-    };
+    const state = { enabled: false, cats: new Map() };
     for (const c of CFG.AMENITIES) {
-      state.cats.set(c.id, { cfg: c, on: ['schools', 'grocery', 'health'].includes(c.id), markers: new Map(), fetched: [], busy: false, note: '' });
+      state.cats.set(c.id, {
+        cfg: c, on: CFG.AMENITIES_DEFAULT_ON.includes(c.id),
+        markers: [], featured: [], shown: false, data: null, promise: null, error: null
+      });
     }
 
     // ---- panel UI -------------------------------------------------------
@@ -31,8 +38,8 @@
     for (const [cid, cat] of state.cats) {
       const cb = U.el('input', { type: 'checkbox', id: 'amen-' + cid });
       cb.checked = cat.on;
-      cb.addEventListener('change', () => { cat.on = cb.checked; syncCategory(cid); refresh(); });
-      const label = U.el('label', { for: 'amen-' + cid, class: 'check-item' }, [
+      cb.addEventListener('change', () => { cat.on = cb.checked; refresh(); });
+      const label = U.el('label', { for: 'amen-' + cid, class: 'check-item', id: 'amen-label-' + cid }, [
         cb,
         U.el('span', { class: 'cat-dot', style: 'background:' + CFG.PALETTE.amenities[cat.cfg.colorToken] }),
         U.el('span', { text: cat.cfg.emoji + ' ' + cat.cfg.label }),
@@ -48,181 +55,140 @@
       status.textContent = text;
       status.className = 'status-line' + (kind ? ' ' + kind : '');
     }
-    function updateCounts() {
-      for (const [cid, cat] of state.cats) {
-        const elc = document.getElementById('amen-count-' + cid);
-        if (elc) elc.textContent = cat.markers.size ? '· ' + cat.markers.size.toLocaleString() : '';
-      }
-    }
 
     // ---- markers --------------------------------------------------------
-    function makeIcon(cat) {
-      return L.divIcon({
-        className: 'poi-icon',
-        html: `<span class="poi-chip" style="border-color:${CFG.PALETTE.amenities[cat.cfg.colorToken]}">${cat.cfg.emoji}</span>`,
-        iconSize: [28, 28], iconAnchor: [14, 14], popupAnchor: [0, -12]
-      });
+    function emojiFor(cat, kind) {
+      for (const [re, e] of cat.cfg.kindEmoji || []) if (re.test(kind)) return e;
+      return cat.cfg.emoji;
     }
-    function osmPopup(cat, tags, elType, elId) {
-      const name = tags.name || tags.brand || '(unnamed ' + cat.cfg.label.toLowerCase() + ')';
-      const addr = [tags['addr:housenumber'], tags['addr:street']].filter(Boolean).join(' ');
-      const addr2 = [tags['addr:city'], tags['addr:postcode']].filter(Boolean).join(' ');
-      const rows = [];
-      if (addr || addr2) rows.push(`<div>${U.escapeHTML([addr, addr2].filter(Boolean).join(', '))}</div>`);
-      if (tags.opening_hours) rows.push(`<div>🕒 ${U.escapeHTML(tags.opening_hours)}</div>`);
-      if (tags.phone || tags['contact:phone']) rows.push(`<div>📞 ${U.escapeHTML(tags.phone || tags['contact:phone'])}</div>`);
-      const site = tags.website || tags['contact:website'];
-      if (site && /^https?:\/\//i.test(site)) rows.push(`<div>🔗 <a href="${U.escapeHTML(site)}" target="_blank" rel="noopener">website</a></div>`);
-      if (tags.cuisine) rows.push(`<div>Cuisine: ${U.escapeHTML(tags.cuisine.replace(/_/g, ' '))}</div>`);
-      return `<div class="popup-poi"><h3>${U.escapeHTML(name)}</h3>
-        <div class="popup-cat">${cat.cfg.emoji} ${U.escapeHTML(cat.cfg.label)}</div>${rows.join('')}
-        <div class="popup-src">Source: <a href="https://www.openstreetmap.org/${elType}/${elId}" target="_blank" rel="noopener">OpenStreetMap</a> contributors</div></div>`;
-    }
-    function ncesPopup(cat, p, kindLabel, yearLabel) {
-      const pick = names => { for (const n of names) { if (p[n] != null && p[n] !== '' && String(p[n]).toUpperCase() !== 'NULL') return p[n]; } return null; };
-      const name = pick(['NAME', 'SCH_NAME', 'INSTNM', 'name']) || '(school)';
-      const street = pick(['STREET', 'LSTREET', 'LSTREET1', 'ADDRESS']) || '';
-      const city = pick(['CITY', 'LCITY']) || '';
-      const zip = pick(['ZIP', 'LZIP']) || '';
-      return `<div class="popup-poi"><h3>${U.escapeHTML(name)}</h3>
-        <div class="popup-cat">${cat.cfg.emoji} ${U.escapeHTML(kindLabel)}</div>
-        ${street || city ? `<div>${U.escapeHTML([street, city, zip].filter(Boolean).join(', '))}</div>` : ''}
-        <div class="popup-src">Source: NCES EDGE school locations${yearLabel ? ' (' + U.escapeHTML(yearLabel) + ')' : ''}</div></div>`;
-    }
-    function addMarker(cat, uid, lat, lon, popupHTML) {
-      if (cat.markers.has(uid)) return;
-      const m = L.marker([lat, lon], { icon: makeIcon(cat) }).bindPopup(popupHTML, { maxWidth: 300 });
-      cat.markers.set(uid, m);
-      if (state.enabled && cat.on) cluster.addLayer(m);
-    }
-    function syncCategory(cid) {
-      const cat = state.cats.get(cid);
-      const ms = Array.from(cat.markers.values());
-      if (state.enabled && cat.on) cluster.addLayers(ms);
-      else cluster.removeLayers(ms);
+    const icons = new Map();
+    function iconFor(cat, emoji, big) {
+      const key = cat.cfg.id + '|' + emoji + '|' + big;
+      if (!icons.has(key)) {
+        const color = CFG.PALETTE.amenities[cat.cfg.colorToken];
+        icons.set(key, L.divIcon({
+          className: 'poi-icon',
+          html: `<span class="poi-chip${big ? ' poi-chip-lg' : ''}" style="border-color:${color}">${emoji}</span>`,
+          iconSize: big ? [34, 34] : [28, 28], iconAnchor: big ? [17, 17] : [14, 14], popupAnchor: [0, -12]
+        }));
+      }
+      return icons.get(key);
     }
 
-    // ---- NCES -----------------------------------------------------------
-    async function resolveNCES() {
-      if (state.nces.resolved) return state.nces.resolved;
-      if (state.nces.promise) return state.nces.promise;
-      state.nces.promise = (async () => {
-        const out = { k12: [], postsecondary: [] };
-        const folderK12 = await U.fetchJSON(CFG.NCES.k12Folder + '?f=json', { timeout: 20000 });
-        const names = (folderK12.services || []).map(s => s.name.split('/').pop());
-        for (const kind of ['PUBLICSCH', 'PRIVATESCH']) {
-          const matches = names.map(n => { const m = n.match(CFG.NCES.k12Match); return m && m[1].toUpperCase() === kind ? { n, yr: +m[2] } : null; })
-            .filter(Boolean).sort((a, b) => b.yr - a.yr);
-          if (matches.length) out.k12.push({
-            url: `${CFG.NCES.k12Folder}/${matches[0].n}/MapServer/0`,
-            label: (kind === 'PUBLICSCH' ? 'Public school' : 'Private school'),
-            year: String(matches[0].yr)
-          });
-        }
-        try {
-          const folderPost = await U.fetchJSON(CFG.NCES.postsecFolder + '?f=json', { timeout: 20000 });
-          const pNames = (folderPost.services || []).map(s => s.name.split('/').pop());
-          const pm = pNames.map(n => { const m = n.match(CFG.NCES.postsecMatch); return m ? { n, yr: +m[1] } : null; })
-            .filter(Boolean).sort((a, b) => b.yr - a.yr);
-          if (pm.length) out.postsecondary.push({
-            url: `${CFG.NCES.postsecFolder}/${pm[0].n}/MapServer/0`,
-            label: 'College / university', year: String(pm[0].yr)
-          });
-        } catch (e) { /* postsecondary folder optional */ }
-        if (!out.k12.length && !out.postsecondary.length) throw new Error('no NCES services found');
-        state.nces.resolved = out;
-        return out;
-      })();
-      state.nces.promise.catch(() => { state.nces.promise = null; state.nces.failed = true; });
-      return state.nces.promise;
-    }
-    async function fetchNCES(cat, bounds) {
-      const resolved = await resolveNCES();
-      const services = resolved[cat.cfg.ncesKind] || [];
-      if (!services.length) throw new Error('no NCES service');
-      for (const svc of services) {
-        const fc = await U.arcgis.query(svc.url, Object.assign({
-          outFields: '*', geometryPrecision: 6
-        }, U.arcgis.envelope(bounds)), { pageSize: 1000, maxFeatures: cat.cfg.cap });
-        for (const f of fc.features) {
-          if (!f.geometry || f.geometry.type !== 'Point') continue;
-          const [lon, lat] = f.geometry.coordinates;
-          const p = f.properties || {};
-          const uid = 'nces:' + (p.NCESSCH || p.PPIN || p.UNITID || p.OBJECTID || (svc.url + ':' + lon + ',' + lat));
-          addMarker(cat, uid, lat, lon, ncesPopup(cat, p, svc.label, svc.year));
-        }
-      }
-      cat.note = 'NCES';
+    function popupHTML(cat, d, F, r) {
+      const kind = d.kinds[r[F.kind]] || cat.cfg.label;
+      const src = d.sources[r[F.src]] || {};
+      const ref = F.ref != null ? r[F.ref] : null;
+      const osm = ref && /^[nwr]\d+$/.test(ref) ? `https://www.openstreetmap.org/${OSM_TYPES[ref[0]]}/${ref.slice(1)}` : null;
+      const link = osm || src.url || null;
+      const srcName = U.escapeHTML(src.name || 'Unknown source') + (osm ? ' contributors' : '');
+      const emoji = emojiFor(cat, kind);
+      const val = f => (F[f] != null && r[F[f]] != null ? r[F[f]] : null);
+      const addr = val('addr'), info = val('info'), web = val('web');
+      return `<div class="popup-poi"><h3>${U.escapeHTML(r[F.name] || kind)}</h3>
+        <div class="popup-cat">${emoji} ${U.escapeHTML(kind)}</div>
+        ${addr ? `<div>${U.escapeHTML(addr)}</div>` : ''}
+        ${info ? `<div>${U.escapeHTML(info)}</div>` : ''}
+        ${web && /^https?:\/\/[^\s"'<>]+$/i.test(web) ? `<div>🔗 <a href="${U.escapeHTML(web)}" target="_blank" rel="noopener">Website</a></div>` : ''}
+        <div class="popup-src">Source: ${link ? `<a href="${U.escapeHTML(link)}" target="_blank" rel="noopener">${srcName}</a>` : srcName}</div></div>`;
     }
 
-    // ---- OSM ------------------------------------------------------------
-    async function fetchOSM(cat, bounds) {
-      const bbox = U.overpass.bbox(bounds);
-      const parts = cat.cfg.osm.map(sel => `nwr${sel}(${bbox});`).join('');
-      const ql = `[out:json][timeout:${CFG.OVERPASS.timeoutS}];(${parts});out center ${cat.cfg.cap};`;
-      const data = await U.overpass.run(ql);
-      let n = 0;
-      for (const elm of (data.elements || [])) {
-        const lat = elm.lat != null ? elm.lat : (elm.center && elm.center.lat);
-        const lon = elm.lon != null ? elm.lon : (elm.center && elm.center.lon);
-        if (lat == null) continue;
-        addMarker(cat, 'osm:' + elm.type + '/' + elm.id, lat, lon, osmPopup(cat, elm.tags || {}, elm.type, elm.id));
-        n++;
+    function buildMarkers(cat, d) {
+      const F = {};
+      d.fields.forEach((f, i) => { F[f] = i; });
+      const kindIcons = d.kinds.map(k => ({
+        small: iconFor(cat, emojiFor(cat, k), false),
+        big: iconFor(cat, emojiFor(cat, k), true),
+        featured: !!(cat.cfg.featured && cat.cfg.featured.test(k))
+      }));
+      const fallback = { small: iconFor(cat, cat.cfg.emoji, false), featured: false };
+      for (const r of d.rows) {
+        const ki = kindIcons[r[F.kind]] || fallback;
+        const isFeatured = ki.featured;
+        // Popups are rendered on demand: tens of thousands of markers would
+        // otherwise each carry a pre-built HTML string.
+        const m = L.marker([r[F.lat], r[F.lon]], {
+          icon: isFeatured ? ki.big : ki.small, keyboard: isFeatured, title: r[F.name] || ''
+        }).bindPopup(() => popupHTML(cat, d, F, r), { maxWidth: 300 });
+        (isFeatured ? cat.featured : cat.markers).push(m);
       }
-      if (n >= cat.cfg.cap) cat.note = 'capped at ' + cat.cfg.cap + ' per fetch';
+    }
+
+    function load(cat) {
+      if (cat.data) return Promise.resolve(cat.data);
+      if (!cat.promise) {
+        cat.promise = U.fetchJSON(CFG.AMENITY_DATA_DIR + cat.cfg.id + '.json', { timeout: 60000, retries: 1 })
+          .then(d => {
+            if (!d || !Array.isArray(d.rows) || !Array.isArray(d.fields) || !Array.isArray(d.kinds) || !Array.isArray(d.sources)) {
+              throw new Error('unexpected file format');
+            }
+            buildMarkers(cat, d);
+            cat.data = d;
+            cat.error = null;
+            return d;
+          })
+          .catch(err => { cat.promise = null; cat.error = err; throw err; });
+      }
+      return cat.promise;
+    }
+
+    function sync(cat) {
+      const show = !!(cat.on && cat.data);
+      if (show === !!cat.shown) return;
+      cat.shown = show;
+      if (show) {
+        cluster.addLayers(cat.markers);
+        cat.featured.forEach(m => featuredLayer.addLayer(m));
+      } else {
+        cluster.removeLayers(cat.markers);
+        cat.featured.forEach(m => featuredLayer.removeLayer(m));
+      }
+    }
+
+    function describe(cat) {
+      const d = cat.data;
+      const elc = document.getElementById('amen-count-' + cat.cfg.id);
+      const lab = document.getElementById('amen-label-' + cat.cfg.id);
+      if (!d) { if (elc) elc.textContent = ''; return; }
+      const n = cat.markers.length + cat.featured.length;
+      if (elc) elc.textContent = '· ' + n.toLocaleString();
+      if (lab) lab.title = cat.cfg.label + ': ' + n.toLocaleString() + ' places statewide\n' +
+        d.sources.map(s => '• ' + s.name + ': ' + (s.count || 0).toLocaleString()).join('\n') +
+        (d.built ? '\nBuilt ' + String(d.built).slice(0, 10) : '');
+    }
+
+    function summary() {
+      let total = 0;
+      const featuredNotes = [];
+      for (const [, cat] of state.cats) {
+        if (!cat.on || !cat.data) continue;
+        total += cat.markers.length + cat.featured.length;
+        if (cat.featured.length) featuredNotes.push(cat.featured.length.toLocaleString() + ' ' + cat.cfg.featuredLabel + ' always shown');
+      }
+      return total.toLocaleString() + ' places statewide' + (featuredNotes.length ? ' · ' + featuredNotes.join(' · ') : '');
     }
 
     // ---- orchestration --------------------------------------------------
-    function isCovered(cat, bounds) {
-      return cat.fetched.some(b => b.contains(bounds));
-    }
-    let fetchToken = 0;
+    let token = 0;
     async function refresh() {
       if (!state.enabled) return;
-      const token = ++fetchToken;
-      const zoom = map.getZoom();
-      const bounds = map.getBounds().pad(0.15);
-      const gated = [];
-      const jobs = [];
+      const my = ++token;
+      for (const [, cat] of state.cats) sync(cat); // hide unchecked ones immediately
+      const pending = [];
       for (const [, cat] of state.cats) {
-        if (!cat.on) continue;
-        if (zoom < cat.cfg.minZoom) { gated.push(cat.cfg.label + ' (z' + cat.cfg.minZoom + '+)'); continue; }
-        if (isCovered(cat, bounds) || cat.busy) continue;
-        cat.busy = true;
-        const useNCES = cat.cfg.source === 'nces' && !state.nces.failed;
-        const job = (useNCES ? fetchNCES(cat, bounds) : fetchOSM(cat, bounds))
-          .catch(async err => {
-            if (cat.cfg.source === 'nces') { // authoritative source down -> OSM fallback
-              state.nces.failed = true;
-              cat.note = 'NCES unreachable — OpenStreetMap fallback';
-              try { await fetchOSM(cat, bounds); return; } catch (e2) { err = e2; }
-            }
-            throw err;
-          })
-          .then(() => { cat.fetched.push(bounds); })
-          .finally(() => { cat.busy = false; });
-        jobs.push(job.catch(err => ({ err, cat })));
+        if (cat.on && !cat.data) pending.push(load(cat).then(() => null, err => ({ cat, err })));
       }
-      hint.textContent = gated.length ? 'Zoom in to load: ' + gated.join(', ') : '';
-      if (!jobs.length) { updateCounts(); if (!gated.length) setStatus(totalLabel(), 'ok'); return; }
-      setStatus('Loading places…', 'busy');
-      const results = await Promise.all(jobs);
-      if (token !== fetchToken || !state.enabled) return;
-      updateCounts();
-      const errs = results.filter(r => r && r.err);
-      if (errs.length) setStatus('Some categories failed: ' + errs.map(e => e.cat.cfg.label).join(', '), 'err');
-      else setStatus(totalLabel(), 'ok');
+      hint.textContent = 'Counts are statewide; hover a category to see its sources.';
+      let errs = [];
+      if (pending.length) {
+        setStatus('Loading places…', 'busy');
+        errs = (await Promise.all(pending)).filter(Boolean);
+        if (my !== token || !state.enabled) return;
+      }
+      for (const [, cat] of state.cats) { sync(cat); describe(cat); }
+      if (errs.length) setStatus('Could not load: ' + errs.map(e => e.cat.cfg.label + ' (' + e.err.message + ')').join('; '), 'err');
+      else setStatus(summary(), 'ok');
     }
-    function totalLabel() {
-      let total = 0;
-      for (const [, cat] of state.cats) if (cat.on) total += cat.markers.size;
-      const notes = new Set();
-      for (const [, cat] of state.cats) if (cat.on && cat.note && cat.note !== 'NCES') notes.add(cat.note);
-      return total.toLocaleString() + ' places loaded' + (notes.size ? ' · ' + Array.from(notes).join(' · ') : '');
-    }
-
-    const onMove = U.debounce(() => refresh(), 650);
-    map.on('moveend', onMove);
 
     return {
       id: 'amenities',
@@ -232,11 +198,12 @@
         state.enabled = on;
         if (on) {
           map.addLayer(cluster);
-          for (const [cid] of state.cats) syncCategory(cid);
+          map.addLayer(featuredLayer);
           refresh();
         } else {
-          fetchToken++;
+          token++;
           map.removeLayer(cluster);
+          map.removeLayer(featuredLayer);
           setStatus('Off');
           hint.textContent = '';
         }

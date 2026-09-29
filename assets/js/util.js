@@ -92,6 +92,8 @@
   };
 
   // ------------------------------------------------------------------ http
+  // Relative URLs (same-origin data/ files) have no host of their own.
+  const hostOf = url => { try { return new URL(url, location.href).host + (/^https?:/i.test(url) ? '' : '/' + url); } catch (e) { return url; } };
   async function fetchJSON(url, opts = {}) {
     const { timeout = 30000, retries = 1, init = {} } = opts;
     let lastErr;
@@ -101,10 +103,10 @@
       try {
         const res = await fetch(url, Object.assign({ signal: ctl.signal }, init));
         clearTimeout(timer);
-        if (!res.ok) throw new Error('HTTP ' + res.status + ' from ' + new URL(url).host);
+        if (!res.ok) throw new Error('HTTP ' + res.status + ' from ' + hostOf(url));
         const text = await res.text();
         try { return JSON.parse(text); }
-        catch (e) { throw new Error('Bad JSON from ' + new URL(url).host); }
+        catch (e) { throw new Error('Bad JSON from ' + hostOf(url)); }
       } catch (err) {
         clearTimeout(timer);
         lastErr = err;
