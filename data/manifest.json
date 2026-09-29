@@ -1,1 +1,1 @@
-{"built":"2026-09-29T21:29:19.561Z","steps":{"acs":{"ok":false,"error":"TIGERweb county: {\"code\":400,\"message\":\"Invalid or missing input parameters.\",\"details\":[]} (fields available: )"}}}
+{"built":"2026-09-29T21:30:50.621Z","steps":{"acs":{"ok":true,"seconds":5,"vintage":2024,"keyless":true,"county":{"rows":39,"bytes":6158,"totalPop":7816116,"medianIncome":74202,"medianUninsuredPct":6.16,"withArea":39},"tract":{"rows":1784,"bytes":305898,"totalPop":7816116,"medianIncome":96970,"medianUninsuredPct":5.3,"withArea":1784}}}}
