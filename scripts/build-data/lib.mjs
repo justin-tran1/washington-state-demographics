@@ -1,0 +1,158 @@
+// Shared helpers for the build-time data pipeline.
+//
+// Runs inside GitHub Actions (full internet, Node 22 built-in fetch). Every
+// dataset is written as compact, same-origin JSON under data/, so the map
+// never depends on an upstream API being reachable - or CORS-enabled - from
+// the viewer's browser or corporate network.
+
+import { mkdir, writeFile, readFile } from 'node:fs/promises';
+import { dirname } from 'node:path';
+
+export const UA = 'washington-state-demographics data build (https://github.com/justin-tran1/washington-state-demographics)';
+export const WA_FIPS = '53';
+// Washington bounding box, generous enough to include the San Juans and the
+// Columbia River boundary: south, west, north, east.
+export const WA_BBOX = { s: 45.54, w: -124.85, n: 49.01, e: -116.91 };
+
+const sleep = ms => new Promise(r => setTimeout(r, ms));
+
+export function log(...a) { console.log(new Date().toISOString().slice(11, 19), ...a); }
+
+/** fetch with timeout + retries + exponential backoff. Returns the Response. */
+export async function fetchRetry(url, init = {}, { retries = 3, timeoutMs = 90000 } = {}) {
+  let lastErr;
+  for (let i = 0; i <= retries; i++) {
+    const ctl = new AbortController();
+    const t = setTimeout(() => ctl.abort(), timeoutMs);
+    try {
+      const res = await fetch(url, {
+        ...init,
+        signal: ctl.signal,
+        headers: { 'User-Agent': UA, ...(init.headers || {}) }
+      });
+      clearTimeout(t);
+      if (res.status === 429 || res.status >= 500) throw new Error(`HTTP ${res.status}`);
+      return res;
+    } catch (err) {
+      clearTimeout(t);
+      lastErr = err;
+      if (i < retries) await sleep(2000 * 2 ** i);
+    }
+  }
+  throw new Error(`${new URL(url).host}: ${lastErr && lastErr.message}`);
+}
+
+export async function fetchText(url, init, opts) {
+  const res = await fetchRetry(url, init, opts);
+  if (!res.ok) throw new Error(`HTTP ${res.status} from ${new URL(url).host}`);
+  return res.text();
+}
+
+export async function fetchJSON(url, init, opts) {
+  const text = await fetchText(url, init, opts);
+  try { return JSON.parse(text); }
+  catch (e) { throw new Error(`non-JSON from ${new URL(url).host}: ${text.slice(0, 120).replace(/\s+/g, ' ')}`); }
+}
+
+export const qs = p => Object.entries(p).filter(([, v]) => v != null)
+  .map(([k, v]) => encodeURIComponent(k) + '=' + encodeURIComponent(v)).join('&');
+
+/**
+ * Page through an ArcGIS FeatureServer/MapServer layer. Honours the server's
+ * own maxRecordCount and the exceededTransferLimit flag, so short pages do not
+ * end paging early. Returns an array of { attributes, geometry } (Esri JSON).
+ */
+export async function arcgisAll(layerUrl, params = {}, { max = 200000 } = {}) {
+  const info = await fetchJSON(`${layerUrl}?f=json`);
+  if (info.error) throw new Error(`ArcGIS layer: ${info.error.message}`);
+  const page = Math.min(info.maxRecordCount || 1000, 2000);
+  const out = [];
+  let offset = 0;
+  for (;;) {
+    const p = { where: '1=1', outFields: '*', returnGeometry: true, outSR: 4326, f: 'json',
+      resultRecordCount: page, resultOffset: offset, ...params };
+    const data = await fetchJSON(`${layerUrl}/query?${qs(p)}`);
+    if (data.error) throw new Error(`ArcGIS query: ${data.error.message}`);
+    const feats = data.features || [];
+    out.push(...feats);
+    if (!feats.length || out.length >= max || (!data.exceededTransferLimit && feats.length < page)) break;
+    offset += feats.length;
+  }
+  return { fields: info.fields || [], features: out };
+}
+
+/** Page through a Socrata dataset via SODA. */
+export async function socrataAll(domain, dataset, soql = {}, { max = 500000, page = 50000 } = {}) {
+  const rows = [];
+  for (let offset = 0; rows.length < max; offset += page) {
+    const url = `${domain}/resource/${dataset}.json?${qs({ ...soql, $limit: page, $offset: offset })}`;
+    const batch = await fetchJSON(url);
+    rows.push(...batch);
+    if (batch.length < page) break;
+  }
+  return rows;
+}
+
+// Overpass: only endpoints the source-health probe confirmed answer.
+export const OVERPASS = ['https://overpass-api.de/api/interpreter'];
+
+/** Run an Overpass QL query, retrying across endpoints. */
+export async function overpass(ql, { timeoutMs = 300000 } = {}) {
+  let lastErr;
+  for (const ep of OVERPASS) {
+    for (let attempt = 0; attempt < 3; attempt++) {
+      try {
+        const res = await fetchRetry(ep, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+          body: 'data=' + encodeURIComponent(ql)
+        }, { retries: 0, timeoutMs });
+        const text = await res.text();
+        if (!res.ok) throw new Error(`HTTP ${res.status}: ${text.slice(0, 160)}`);
+        return JSON.parse(text);
+      } catch (err) {
+        lastErr = err;
+        await sleep(15000 * (attempt + 1)); // Overpass asks clients to back off
+      }
+    }
+  }
+  throw lastErr;
+}
+
+/** Statewide Overpass area clause for Washington. */
+export const WA_AREA = 'area["ISO3166-2"="US-WA"][admin_level=4]->.wa;';
+
+export const round = (v, d = 5) => (v == null || !isFinite(v) ? null : Math.round(v * 10 ** d) / 10 ** d);
+
+export function inWA(lat, lon) {
+  return lat >= WA_BBOX.s && lat <= WA_BBOX.n && lon >= WA_BBOX.w && lon <= WA_BBOX.e;
+}
+
+/** Write JSON compactly, creating directories. Returns byte length. */
+export async function writeJSON(path, obj) {
+  await mkdir(dirname(path), { recursive: true });
+  const text = JSON.stringify(obj);
+  await writeFile(path, text);
+  return text.length;
+}
+
+export async function readJSON(path, fallback = null) {
+  try { return JSON.parse(await readFile(path, 'utf8')); } catch (e) { return fallback; }
+}
+
+/**
+ * Run a build step in isolation: one failing upstream must never block the
+ * rest. On failure the previously committed file is left untouched, so the
+ * map keeps serving the last good data.
+ */
+export async function step(name, fn, manifest) {
+  const t0 = Date.now();
+  try {
+    const info = await fn();
+    manifest.steps[name] = { ok: true, seconds: Math.round((Date.now() - t0) / 1000), ...info };
+    log(`OK   ${name}`, JSON.stringify(info));
+  } catch (err) {
+    manifest.steps[name] = { ok: false, error: String(err && err.message || err).slice(0, 400) };
+    log(`FAIL ${name}: ${err && err.stack || err}`);
+  }
+}

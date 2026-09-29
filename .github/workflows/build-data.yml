@@ -1,0 +1,66 @@
+name: Build map data
+
+# Fetches every dataset the map needs from its authoritative source and
+# commits compact JSON under data/, so the browser loads it same-origin from
+# GitHub Pages. That removes all runtime dependence on upstream APIs being
+# reachable, CORS-enabled, keyless and unthrottled from the viewer's network.
+#
+# Optional repository secrets (Settings -> Secrets and variables -> Actions):
+#   CENSUS_API_KEY  free key from https://api.census.gov/data/key_signup.html
+#                   Without it the ACS step reads the Census Bureau's keyless
+#                   summary files instead, which is slower but equivalent.
+#   DATA_GOV_KEY    free key from https://api.data.gov/signup/ for the FBI
+#                   Crime Data Explorer; without it the public DEMO_KEY is used.
+on:
+  push:
+    paths:
+      - 'scripts/build-data/**'
+      - '.github/workflows/build-data.yml'
+  schedule:
+    - cron: '23 9 3 * *'    # 09:23 UTC on the 3rd of each month
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pages: write
+
+concurrency:
+  group: build-data-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Build datasets
+        env:
+          CENSUS_API_KEY: ${{ secrets.CENSUS_API_KEY }}
+          DATA_GOV_KEY: ${{ secrets.DATA_GOV_KEY }}
+        run: node scripts/build-data/index.mjs
+      - name: Commit data if it changed
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add data/
+          if git diff --cached --quiet; then
+            echo "No data changes."
+            exit 0
+          fi
+          git commit -m "Refresh map data ($(date -u +%Y-%m-%d))"
+          git push origin "HEAD:${GITHUB_REF_NAME}"
+          echo "PUSHED=1" >> "$GITHUB_ENV"
+      - name: Request a Pages rebuild (default branch only)
+        # Pushes made with GITHUB_TOKEN may not trigger a Pages build on their
+        # own, so ask for one explicitly after a data refresh on main.
+        if: env.PUSHED == '1' && github.ref_name == github.event.repository.default_branch
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          curl -sS -X POST -H "Authorization: Bearer $GH_TOKEN" \
+            -H "Accept: application/vnd.github+json" \
+            "https://api.github.com/repos/${GITHUB_REPOSITORY}/pages/builds" || true
