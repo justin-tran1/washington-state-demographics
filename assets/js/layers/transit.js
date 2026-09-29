@@ -54,8 +54,10 @@
     if (!key) return null;
     const A = (links.data && links.data.agencies) || {};
     let hit = A[key] && A[key].url ? A[key] : null;
-    if (!hit && key.length >= 4) {
-      // "King County Metro" vs "King County Metro Transit": containment match.
+    if (!A[key] && key.length >= 4) {
+      // "King County Metro" vs "King County Metro Transit": containment match,
+      // only for names the file does not list (a listed agency without a
+      // website must not borrow another's).
       const k2 = Object.keys(A).find(k => A[k].url && k.length >= 4 && (k.includes(key) || key.includes(k)));
       if (k2) hit = Object.assign({ key: k2 }, A[k2]);
     }
@@ -84,12 +86,36 @@
 
   WAMAP.createTransit = function (opts) {
     const { map, card } = opts;
-    const renderer = L.canvas({ padding: 0.3 });
+    // Lines use the map's shared canvas renderer: one canvas per layer would
+    // leave only the topmost one clickable.
     const routesLayer = L.layerGroup();
     const ferryLayer = L.layerGroup();
+    // Stops go in through U.addLayersChunked, which a newer view can cancel.
     const stopsCluster = L.markerClusterGroup({
-      chunkedLoading: true, maxClusterRadius: 40, disableClusteringAtZoom: 16, showCoverageOnHover: false
+      chunkedLoading: false, maxClusterRadius: 40, disableClusteringAtZoom: 16, showCoverageOnHover: false
     });
+    let cancelStops = null;
+    // Replacing routes or stops removes the layer an open popup belongs to,
+    // which closes it; and opening a popup near the edge pans the map, which
+    // triggers exactly such a refresh. So while a route or stop popup is open
+    // and in view, that part waits and catches up once the popup closes.
+    const openPopups = { routes: null, stops: null };
+    const pending = { routes: false, stops: false };
+    const kindOf = popup => (popup && popup._source && popup._source._transitKind) || null;
+    const holds = k => !!(openPopups[k] && map.hasLayer(openPopups[k]) && map.getBounds().contains(openPopups[k].getLatLng()));
+    map.on('popupopen', e => { const k = kindOf(e.popup); if (k) openPopups[k] = e.popup; });
+    map.on('popupclose', e => {
+      const k = kindOf(e.popup);
+      if (!k || openPopups[k] !== e.popup) return;
+      openPopups[k] = null;
+      if (pending[k]) { pending[k] = false; refresh(false); }
+    });
+    function setStops(markers) {
+      for (const m of markers) m._transitKind = 'stops';
+      if (cancelStops) { cancelStops(); cancelStops = null; }
+      stopsCluster.clearLayers();
+      if (markers.length) cancelStops = U.addLayersChunked(stopsCluster, markers, () => { cancelStops = null; });
+    }
 
     const state = {
       enabled: false,
@@ -116,11 +142,12 @@
     mkSub('Stops', 'Stops & stations (zoom 13+)');
     mkSub('Ferries', 'WSF ferry routes');
     const legend = U.el('div', { class: 'mode-legend' });
+    const legendLines = [];
     for (const t of [3, 0, 2, 1, 4]) {
       const m = modeStyle(t);
-      legend.appendChild(U.el('span', { class: 'mode-chip' }, [
-        U.el('span', { class: 'mode-line', style: `background:${m.color}` }), m.label
-      ]));
+      const line = U.el('span', { class: 'mode-line', style: `background:${m.color}` });
+      legendLines.push([line, t]);
+      legend.appendChild(U.el('span', { class: 'mode-chip' }, [line, m.label]));
     }
     const status = U.el('div', { class: 'status-line', text: 'Off' });
     body.append(subs, legend, status);
@@ -211,7 +238,6 @@
     function addRouteFeatures(features, fieldsSpec) {
       routesLayer.clearLayers();
       const gj = L.geoJSON({ type: 'FeatureCollection', features }, {
-        renderer,
         style: f => {
           const p = f.properties || {};
           const t = normalizeRouteType(fieldsSpec && fieldsSpec.type ? p[fieldsSpec.type]
@@ -220,6 +246,7 @@
           return { color: m.color, weight: m.weight, opacity: 0.8, dashArray: m.dash || null };
         },
         onEachFeature: (f, lyr) => {
+          lyr._transitKind = 'routes';
           // Rendered when opened, so the agency-link file has had time to load.
           lyr.bindPopup(() => routePopup(f.properties || {}, fieldsSpec), { maxWidth: 300 });
           lyr.on('mouseover', () => lyr.setStyle({ weight: (lyr.options.weight || 2) + 2, opacity: 1 }));
@@ -283,7 +310,6 @@
         outFields: '*', geometryPrecision: 6
       }, U.arcgis.envelope(bounds)), { pageSize: 2000, maxFeatures: 5000 });
       if (gen !== state.stopsGen) return 0;
-      stopsCluster.clearLayers();
       const markers = [];
       for (const f of fc.features) {
         if (!f.geometry || f.geometry.type !== 'Point') continue;
@@ -299,7 +325,7 @@
            ${freq !== '' ? `<div>Service frequency: ${U.escapeHTML(String(freq))}</div>` : ''}
            <div class="popup-src">Source: WSDOT statewide GTFS</div></div>`, { maxWidth: 280 }));
       }
-      stopsCluster.addLayers(markers);
+      setStops(markers);
       return markers.length;
     }
     async function fetchStopsOSM(bounds, gen) {
@@ -310,7 +336,6 @@
         `node["amenity"="ferry_terminal"](${bbox}););out 4000;`;
       const data = await U.overpass.run(ql);
       if (gen !== state.stopsGen) return 0;
-      stopsCluster.clearLayers();
       const markers = [];
       for (const elm of (data.elements || [])) {
         if (elm.lat == null) continue;
@@ -319,7 +344,7 @@
           `<div class="popup-poi"><h3>${U.escapeHTML(name)}</h3><div class="popup-cat">🚏 Stop / station</div>
            <div class="popup-src">Source: OpenStreetMap contributors</div></div>`, { maxWidth: 280 }));
       }
-      stopsCluster.addLayers(markers);
+      setStops(markers);
       return markers.length;
     }
 
@@ -334,15 +359,14 @@
         const fc = await U.arcgis.query(CFG.TRANSIT.ferryService + '/' + lyr.id, {
           outFields: '*', geometryPrecision: 5
         }, { pageSize: 500, maxFeatures: 500 });
-        const m = modeStyle(4);
         ferryLayer.addLayer(L.geoJSON(fc, {
-          renderer,
-          style: { color: m.color, weight: 3, opacity: 0.85, dashArray: '6 6' },
+          // A function, so a theme change can re-apply it (resetStyle).
+          style: () => ({ color: modeStyle(4).color, weight: 3, opacity: 0.85, dashArray: '6 6' }),
           onEachFeature: (f, lyr2) => {
             const p = f.properties || {};
             const name = p.ROUTE || p.RouteName || p.Route_Name || p.NAME || p.Name || 'Ferry route';
-            lyr2.bindPopup(`<div class="popup-poi"><h3>${U.escapeHTML(String(name))}</h3>
-              <div class="popup-cat"><span class="mode-line" style="background:${m.color}"></span> Washington State Ferries</div>
+            lyr2.bindPopup(() => `<div class="popup-poi"><h3>${U.escapeHTML(String(name))}</h3>
+              <div class="popup-cat"><span class="mode-line" style="background:${modeStyle(4).color}"></span> Washington State Ferries</div>
               <div>🔗 <a href="${CFG.TRANSIT.ferryWebsite}" target="_blank" rel="noopener">Schedules &amp; sailings (WSDOT)</a></div>
               <div class="popup-src">Source: WSDOT Ferry Routes</div></div>`);
           }
@@ -361,7 +385,8 @@
       const jobs = [];
       let note = '';
 
-      if (state.showRoutes) {
+      if (state.showRoutes && !force && holds('routes')) pending.routes = true;
+      else if (state.showRoutes) {
         if (zoom < CFG.TRANSIT.routesMinZoom) { state.routesGen++; routesLayer.clearLayers(); state.lastRoutesKey = null; note = 'Zoom in for routes (z' + CFG.TRANSIT.routesMinZoom + '+). '; }
         else {
           const key = boundsKey(bounds, 'r' + (zoom < 10 ? 'a' : zoom < 12 ? 'b' : 'c'));
@@ -382,8 +407,9 @@
           }
         }
       }
-      if (state.showStops) {
-        if (zoom < CFG.TRANSIT.stopsMinZoom) { state.stopsGen++; stopsCluster.clearLayers(); state.lastStopsKey = null; }
+      if (state.showStops && !force && holds('stops')) pending.stops = true;
+      else if (state.showStops) {
+        if (zoom < CFG.TRANSIT.stopsMinZoom) { state.stopsGen++; setStops([]); state.lastStopsKey = null; }
         else {
           const key = boundsKey(bounds, 's');
           if (force || key !== state.lastStopsKey) {
@@ -417,7 +443,13 @@
 
     const onMove = U.debounce(() => refresh(false), 600);
     map.on('moveend', onMove);
-    U.theme.onChange(() => { if (state.enabled) refresh(true); });
+    // A theme change only recolours: nothing is fetched again.
+    U.theme.onChange(() => {
+      for (const [line, t] of legendLines) line.style.background = modeStyle(t).color;
+      for (const group of [routesLayer, ferryLayer]) {
+        group.eachLayer(gj => { if (gj.resetStyle) gj.eachLayer(l => gj.resetStyle(l)); });
+      }
+    });
 
     return {
       id: 'transit',
@@ -428,6 +460,9 @@
         if (on) { loadLinks(); applyVisibility(); refresh(true); }
         else {
           token++;
+          state.stopsGen++;
+          setStops([]);
+          state.lastStopsKey = null;
           applyVisibility();
           setStatus('Off');
         }

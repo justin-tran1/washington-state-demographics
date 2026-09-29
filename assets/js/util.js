@@ -40,6 +40,51 @@
     let t; return function (...a) { clearTimeout(t); t = setTimeout(() => fn.apply(this, a), ms); };
   };
 
+  /**
+   * Add markers to a MarkerClusterGroup in time-sliced batches; returns a
+   * function that cancels the rest. markercluster's own chunkedLoading keeps
+   * adding after clearLayers()/removeLayers() and throws once its group is
+   * off the map, so groups fed through here are built with it switched off.
+   */
+  function addLayersChunked(group, layers, onDone) {
+    let i = 0, cancelled = false;
+    (function step() {
+      if (cancelled) return;
+      const t0 = performance.now();
+      while (i < layers.length && performance.now() - t0 < 40) {
+        group.addLayers(layers.slice(i, i + 1000));
+        i += 1000;
+      }
+      if (i < layers.length) setTimeout(step, 0);
+      else if (onDone) onDone();
+    })();
+    return () => { cancelled = true; };
+  }
+
+  // Washington wall-clock time: feeds publish "floating" timestamps without
+  // a UTC offset, and incidents are shown in local (Pacific) time whatever
+  // the viewer's own time zone.
+  const PT = 'America/Los_Angeles';
+  let ptOffsetFmt = null;
+  function pacificOffset(t) {
+    try {
+      ptOffsetFmt = ptOffsetFmt || new Intl.DateTimeFormat('en-US', { timeZone: PT, timeZoneName: 'shortOffset' });
+      const part = ptOffsetFmt.formatToParts(new Date(t)).find(x => x.type === 'timeZoneName');
+      return -parseInt(String(part && part.value).replace('GMT', ''), 10) || 8;
+    } catch (e) { return 8; }
+  }
+  /** Epoch ms of a timestamp; one without an offset is read as Pacific time. */
+  function parsePacific(s) {
+    const str = String(s == null ? '' : s).trim();
+    if (/(z|[+-]\d\d:?\d\d)$/i.test(str)) return Date.parse(str);
+    const m = str.match(/^(\d{4})-(\d\d)-(\d\d)(?:[T ](\d\d):(\d\d)(?::(\d\d))?)?/);
+    if (!m) return Date.parse(str);
+    const wall = Date.UTC(+m[1], +m[2] - 1, +m[3], +(m[4] || 0), +(m[5] || 0), +(m[6] || 0));
+    for (const h of [7, 8]) if (pacificOffset(wall + h * 3600000) === h) return wall + h * 3600000;
+    return wall + 8 * 3600000;
+  }
+  const fmtPacific = d => d.toLocaleString('en-US', { timeZone: PT, dateStyle: 'medium', timeStyle: 'short' }) + ' PT';
+
   // --------------------------------------------------------------- storage
   const store = {
     get(key) {
@@ -521,7 +566,7 @@
   };
 
   WAMAP.util = {
-    $, $$, el, escapeHTML, fmt, debounce, store, fetchJSON, qs,
+    $, $$, el, escapeHTML, fmt, debounce, addLayersChunked, parsePacific, fmtPacific, store, fetchJSON, qs,
     arcgis, socrataQuery, socrataColumns, overpass, censusStore, tigerweb, geo, geocode, theme
   };
 })();

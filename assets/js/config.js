@@ -416,9 +416,10 @@
       // "Theft From Motor Vehicle" / "Vehicle Prowl" are larceny, not MVT.
       { id: 'mvt', label: 'Motor vehicle theft', group: 'property', re: /MOTOR VEHICLE THEFT|AUTO THEFT|VEHICLE THEFT|STOLEN VEHICLE|THEFT - (MOTOR )?VEHICLE(\|\||$)|TAKING (A )?MOTOR VEHICLE/ },
       { id: 'burglary', label: 'Burglary / B&E', group: 'property', re: /BURGLARY|BREAKING/ },
-      { id: 'theft', label: 'Larceny / theft', group: 'property', re: /LARCENY|THEFT|SHOPLIFT|PICKPOCKET|PURSE|STOLEN PROPERTY|PROWL/ },
+      // Before theft: "Identity Theft" and NIBRS "False Pretenses/Swindle" are fraud.
+      { id: 'fraud', label: 'Fraud / forgery', group: 'property', re: /FRAUD|FORGERY|COUNTERFEIT|EMBEZZLE|EXTORTION|BLACKMAIL|BAD CHECK|IDENTITY|FALSE PRETENSE|SWINDLE|CONFIDENCE GAME|IMPERSONAT|HACKING|COMPUTER INVASION/ },
+      { id: 'theft', label: 'Larceny / theft', group: 'property', re: /LARCENY|THEFT|SHOPLIFT|PICKPOCKET|POCKET.?PICK|PURSE|STOLEN PROPERTY|PROWL/ },
       { id: 'vandalism', label: 'Vandalism / property damage', group: 'property', re: /VANDALISM|DESTRUCTION|DAMAGE|MALICIOUS MISCHIEF|CRIMINAL MISCHI|GRAFFITI/ },
-      { id: 'fraud', label: 'Fraud / forgery', group: 'property', re: /FRAUD|FORGERY|COUNTERFEIT|EMBEZZLE|EXTORTION|BAD CHECK|IDENTITY/ },
       { id: 'drugs', label: 'Drugs / narcotics', group: 'society', re: /DRUG|NARCOTIC|VUCSA|CONTROLLED SUBSTANCE/ },
       { id: 'weapons', label: 'Weapons', group: 'society', re: /WEAPON|FIREARM/ },
       { id: 'dui', label: 'DUI', group: 'society', re: /DUI|DRIVING UNDER/ },
@@ -431,7 +432,10 @@
     statewide: {
       file: 'data/crime/agencies.json',
       // Categories the statewide counts cannot split out (see crime.mjs).
-      notCounted: { mvt: 'counted under theft', dui: 'arrest-only (Group B)', trespass: 'arrest-only (Group B)' }
+      notCounted: {
+        mvt: 'counted under theft', fraud: 'fraud itself is counted under theft; only forgery and extortion are split out',
+        dui: 'arrest-only (Group B)', trespass: 'arrest-only (Group B)'
+      }
     },
     // Incident-level feeds. 'socrata' / 'arcgis' are queried live by the
     // browser; 'prebuilt' feeds publish block addresses only and are
@@ -539,11 +543,11 @@
     { section: 'Demographics & health insurance', items: [
       'U.S. Census Bureau, American Community Survey (ACS) 5-Year Estimates for every Washington county and census tract. A GitHub Action reads the Census Bureau\'s keyless ACS Summary Files each month and publishes them with the map, so the browser never calls the Census API (which has required an API key since May 2026). The vintage in use is shown in the layer legend; the newest published vintage is picked up automatically.',
       'Health insurance coverage: ACS detailed table B27010 (health insurance by age, civilian noninstitutionalized population) - the uninsured share is the "no health insurance coverage" lines over the table universe, the same measure as subject table S2701.',
-      'Land area and tract names: U.S. Census Bureau Gazetteer files. Boundaries: TIGERweb generalized census tracts and the Census cartographic county boundaries.',
+      'Land area and tract names: U.S. Census Bureau Gazetteer files. Boundaries: Census cartographic boundary files (1:500,000, clipped to the shoreline), pre-built with the map; TIGERweb is the fallback.',
       'Median values are ACS estimates and carry margins of error; small tracts have wider error bands. Values suppressed by the Census Bureau are shown as "no data".'
     ]},
     { section: 'Amenities', items: [
-      'Every category is pulled for the whole state each month (no per-view caps or zoom limits) and merged from authoritative registries first, then OpenStreetMap to fill gaps. A point that duplicates one from a registry (same name nearby, or the same kind of place at the same spot) is dropped. Hover a category in the panel to see how many places each source contributed.',
+      'Every category is pulled for the whole state each month (no per-view caps or zoom limits) and merged from authoritative registries first, then OpenStreetMap to fill gaps. A point that duplicates one from a registry (the same name nearby, or the same kind of place at the same spot under a compatible name) is dropped; town names, health-system brands and store numbers do not make two names the same. Hover a category in the panel to see how many places each source contributed.',
       'Hospitals & clinics: WA Department of Health licensed hospitals; CMS Provider of Services (hospitals, critical access hospitals, federally qualified health centers, rural health clinics, ambulatory surgery centers) via HRSA; Veterans Health Administration facilities; HRSA health center sites; WA DOH local health jurisdiction clinics; plus OpenStreetMap hospitals, clinics, urgent care and doctors\' offices. Hospitals are drawn larger and never clustered.',
       'Pharmacies: WA DOH licensed pharmacies where available, otherwise community pharmacies from the federal NPI registry (NPPES), geocoded by the U.S. Census Bureau; plus OpenStreetMap.',
       'Grocery: USDA SNAP-authorized food retailers plus OpenStreetMap. Banks & credit unions: FDIC BankFind branches, NCUA credit union branches (geocoded) and OpenStreetMap. Fuel & EV charging: NREL Alternative Fuels Data Center public stations plus OpenStreetMap. Parks: Washington State Parks, USGS PAD-US public parks and recreation areas, and OpenStreetMap parks and playgrounds.',

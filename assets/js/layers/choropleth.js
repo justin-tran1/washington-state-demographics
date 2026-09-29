@@ -120,7 +120,12 @@
     // Colors resolve per theme at draw time, never captured at construction.
     const ramp = () => U.theme.colors()[rampKey];
     const noData = () => U.theme.colors().noData;
-    const renderer = L.canvas({ padding: 0.3 });
+    // Polygons share the map's single canvas with transit lines and crime
+    // circles (one canvas hit-tests all of them). So a hovered area is not
+    // raised with bringToFront, which would lift it over those layers for
+    // good; a non-interactive outline is drawn on top instead.
+    let hoverOutline = null;
+    const clearHover = () => { if (hoverOutline) { map.removeLayer(hoverOutline); hoverOutline = null; } };
 
     const state = {
       enabled: false,
@@ -219,9 +224,9 @@
         state.renderKey = renderKey;
 
         if (state.layer) { map.removeLayer(state.layer); state.layer = null; }
+        clearHover();
         state.level = level;
         state.layer = L.geoJSON({ type: 'FeatureCollection', features }, {
-          renderer,
           style: f => {
             const v = valueFor(f.properties.GEOID, acs, f);
             return {
@@ -232,10 +237,12 @@
           onEachFeature: (f, lyr) => {
             const geoid = f.properties.GEOID;
             lyr.on('mouseover', () => {
-              lyr.setStyle({ weight: 2.5, color: U.theme.colors().hoverOutline });
-              if (lyr.bringToFront) lyr.bringToFront();
+              clearHover();
+              hoverOutline = L.geoJSON(f, {
+                interactive: false, style: { fill: false, weight: 2.5, color: U.theme.colors().hoverOutline, opacity: 1 }
+              }).addTo(map);
             });
-            lyr.on('mouseout', () => state.layer && state.layer.resetStyle(lyr));
+            lyr.on('mouseout', clearHover);
             const row = acs.rows[geoid];
             const v = valueFor(geoid, acs, f);
             const name = (row && row.name ? row.name.split(';')[0] : f.properties.NAME) || geoid;
@@ -339,6 +346,7 @@
         } else {
           renderToken++;
           if (state.layer) { map.removeLayer(state.layer); state.layer = null; }
+          clearHover();
           state.renderKey = null;
           legendBox.style.display = 'none';
           setStatus('Off');

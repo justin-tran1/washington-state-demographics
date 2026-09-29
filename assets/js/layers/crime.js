@@ -30,11 +30,15 @@
 
   WAMAP.createCrime = function (opts) {
     const { map, card } = opts;
+    // Markers are added in cancellable batches (U.addLayersChunked): the
+    // plugin's own chunkedLoading cannot be stopped when the view changes.
     const cluster = L.markerClusterGroup({
-      chunkedLoading: true, maxClusterRadius: 50, disableClusteringAtZoom: 17, showCoverageOnHover: false
+      chunkedLoading: false, maxClusterRadius: 50, disableClusteringAtZoom: 17, showCoverageOnHover: false
     });
     let heat = null;
-    const agencyRenderer = L.canvas({ padding: 0.3 });
+    let cancelAdd = null;
+    // Circles use the map's shared canvas: a second canvas on top would take
+    // every click and hover meant for the choropleth and transit lines.
     const agencyLayer = L.layerGroup();
     const legendBox = U.el('div', { class: 'legend-block', 'data-layer': 'crime' });
     WAMAP.legendHost.appendChild(legendBox);
@@ -92,6 +96,7 @@
     controls.append(rangeSel, modeSel);
 
     const catList = U.el('div', { class: 'check-list crime-cats' });
+    const groupDots = [];
     const groups = [
       { id: 'person', label: 'Crimes against persons' },
       { id: 'property', label: 'Crimes against property' },
@@ -102,10 +107,10 @@
       const cats = CFG.CRIME.categories.filter(c => c.group === g.id);
       if (!cats.length) continue;
       const gcb = U.el('input', { type: 'checkbox', id: 'crime-group-' + g.id });
+      const dot = U.el('span', { class: 'cat-dot', style: 'background:' + U.theme.colors().crimeGroups[g.id] });
+      groupDots.push([dot, g.id]);
       const header = U.el('label', { class: 'check-group', for: 'crime-group-' + g.id }, [
-        gcb,
-        U.el('span', { class: 'cat-dot', style: 'background:' + U.theme.colors().crimeGroups[g.id] }),
-        U.el('strong', { text: g.label })
+        gcb, dot, U.el('strong', { text: g.label })
       ]);
       catList.appendChild(header);
       const syncGroupBox = () => {
@@ -217,7 +222,7 @@
         const cls = classOf(x.rate, breaks);
         const radius = 3 + 24 * Math.sqrt(x.n / max);
         L.circleMarker([x.r[F.lat], x.r[F.lon]], {
-          renderer: agencyRenderer, radius,
+          radius,
           color: cls < 0 ? CFG.PALETTE.brand.cement : CFG.PALETTE.heatGradient[1.0], weight: 1,
           fillColor: cls < 0 ? U.theme.colors().noData : colors[cls], fillOpacity: 0.78
         }).bindPopup(() => agencyPopup(d, x, cats), { maxWidth: 320 }).addTo(agencyLayer);
@@ -321,7 +326,8 @@
           res = await U.socrataQuery(city.cfg.domains, city.cfg.dataset, {
             $select: [schema.date, ...schema.offense, schema.lat, schema.lon, schema.point, schema.addr, schema.area].filter(Boolean).map(soqlName).join(','),
             $where: `${schema.date} >= '${since}'`,
-            $order: `${schema.date} DESC`
+            // Many reports share a timestamp: :id keeps page boundaries stable.
+            $order: `${schema.date} DESC, :id`
           }, { maxRows: CFG.CRIME.maxPerCity });
           f = schema;
           break;
@@ -339,8 +345,9 @@
         } else { lat = parseFloat(r[f.lat]); lon = parseFloat(r[f.lon]); }
         // Seattle writes the literal string "REDACTED" for suppressed locations.
         if (!isFinite(lat) || !isFinite(lon) || Math.abs(lat) < 1) { noCoords++; continue; }
-        const date = r[f.date] ? new Date(r[f.date]) : null;
-        if (date && tooNew(date.getTime())) continue;
+        const t = r[f.date] ? U.parsePacific(r[f.date]) : NaN;
+        const date = isFinite(t) ? new Date(t) : null;
+        if (date && tooNew(t)) continue;
         const texts = f.offense.map(k => r[k]).filter(Boolean);
         const cat = classify(texts.join('||'));
         incidents.push({
@@ -356,13 +363,15 @@
       const cfg = city.cfg, fl = cfg.fields;
       if (!city.resolved) {
         const info = await U.arcgis.layerInfo(cfg.url);
-        city.resolved = { pageSize: Math.min(2000, info.maxRecordCount || 1000) };
+        const oid = info.objectIdField || ((info.fields || []).find(x => x.type === 'esriFieldTypeOID') || {}).name || null;
+        city.resolved = { pageSize: Math.min(2000, info.maxRecordCount || 1000), oid };
       }
       const since = sinceDate();
       // Only the configured columns are ever requested: some layers also
       // carry officer names or narratives that have no place on a map.
       const outFields = [fl.date, ...fl.offense, fl.addr, fl.lat, fl.lon].filter(Boolean).join(',');
-      const params = { outFields, geometryPrecision: 6, orderByFields: `${fl.date} DESC`,
+      // The object id breaks ties between equal dates, so pages never overlap.
+      const params = { outFields, geometryPrecision: 6, orderByFields: `${fl.date} DESC` + (city.resolved.oid ? `, ${city.resolved.oid}` : ''),
         where: `${fl.date} >= TIMESTAMP '${isoDay(since)} 00:00:00'` };
       const opts = { pageSize: city.resolved.pageSize, maxFeatures: CFG.CRIME.maxPerCity };
       let fc;
@@ -379,7 +388,7 @@
         else if (f.geometry && f.geometry.type === 'Point') { lon = f.geometry.coordinates[0]; lat = f.geometry.coordinates[1]; }
         if (!isFinite(lat) || !isFinite(lon) || !lat || Math.abs(lat) < 1) { noCoords++; continue; }
         const raw = p[fl.date];
-        const t = raw == null ? NaN : (typeof raw === 'number' ? raw : Date.parse(raw));
+        const t = raw == null ? NaN : (typeof raw === 'number' ? raw : U.parsePacific(raw));
         if (isFinite(t) && (t < since.getTime() || tooNew(t))) continue; // belt & braces if where was ignored
         const texts = fl.offense.map(k => p[k]).filter(Boolean).map(String);
         const cat = classify(texts.join('||'));
@@ -418,27 +427,33 @@
     async function fetchCity(cid) {
       const city = state.cities.get(cid);
       if (!city || city.status === 'busy') return;
+      // Only the newest request may write: a slow answer for the previous
+      // time range must not replace the current one.
+      const req = city.req = (city.req || 0) + 1;
       city.status = 'busy';
       city.error = null;
       updateCityChips();
       updateStatusLine();
       try {
         const res = await ADAPTERS[city.cfg.type](city);
+        if (req !== city.req) return;
         city.incidents = res.incidents;
         city.truncated = res.truncated;
         city.noCoords = res.noCoords;
         city.status = 'ok';
       } catch (err) {
+        if (req !== city.req) return;
         city.status = 'err';
         city.error = err.message;
         city.incidents = [];
       }
       updateCityChips();
-      renderIncidents();
+      scheduleRender();
       updateStatusLine();
     }
 
     function updateStatusLine() {
+      if (!state.enabled) return;
       const parts = [];
       let anyBusy = false;
       const truncated = [];
@@ -471,7 +486,7 @@
       return `<div class="popup-poi"><h3>${U.escapeHTML(inc.offense)}</h3>
         <div class="popup-cat"><span class="cat-dot" style="background:${U.theme.colors().crimeGroups[inc.group]}"></span>
         ${U.escapeHTML(cat.label)}</div>
-        ${inc.date ? `<div>${U.escapeHTML(inc.date.toLocaleString())}</div>` : ''}
+        ${inc.date ? `<div>${U.escapeHTML(U.fmtPacific(inc.date))}</div>` : ''}
         ${inc.addr ? `<div>${U.escapeHTML(inc.addr)}</div>` : ''}
         <div class="popup-src">Source: <a href="${U.escapeHTML(city.cfg.link)}" target="_blank" rel="noopener">${U.escapeHTML(city.cfg.label)} open data</a></div></div>`;
     }
@@ -486,16 +501,27 @@
       }
       return dotIcons[color];
     }
+    // Feeds finish one after another: renders requested in quick succession
+    // are coalesced into one.
+    let renderTimer = null;
+    function scheduleRender() {
+      clearTimeout(renderTimer);
+      renderTimer = setTimeout(renderIncidents, 30);
+    }
     function renderIncidents() {
+      clearTimeout(renderTimer);
+      if (cancelAdd) { cancelAdd(); cancelAdd = null; }
       if (!state.enabled) return;
       const incidents = activeIncidents();
       cluster.clearLayers();
       if (heat) { map.removeLayer(heat); heat = null; }
       if (state.mode === 'clusters') {
         if (!map.hasLayer(cluster)) map.addLayer(cluster);
-        cluster.addLayers(incidents.map(inc =>
+        // One marker per incident, reused across renders.
+        const markers = incidents.map(inc => inc.marker || (inc.marker =
           L.marker([inc.lat, inc.lon], { icon: dotIcon(inc.group), keyboard: false })
             .bindPopup(() => incidentPopup(inc), { maxWidth: 300 })));
+        cancelAdd = U.addLayersChunked(cluster, markers, () => { cancelAdd = null; });
       } else {
         if (map.hasLayer(cluster)) map.removeLayer(cluster);
         if (incidents.length) {
@@ -528,6 +554,7 @@
     rangeSel.addEventListener('change', () => {
       state.range = +rangeSel.value;
       for (const [cid, city] of state.cities) {
+        city.req = (city.req || 0) + 1; // answers still in flight are for the old range
         city.status = 'idle'; // stale for the new range even while the layer is off
         if (state.enabled && city.on) fetchCity(cid);
       }
@@ -535,7 +562,12 @@
     });
     modeSel.addEventListener('change', () => { state.mode = modeSel.value; renderIncidents(); });
     map.on('moveend', U.debounce(() => updateViewCounts(), 350));
-    U.theme.onChange(() => { if (state.enabled) { renderIncidents(); renderAgencies(); } });
+    U.theme.onChange(() => {
+      for (const [dot, gid] of groupDots) dot.style.background = U.theme.colors().crimeGroups[gid];
+      // Markers carry the old theme's colours: rebuild them.
+      for (const [, city] of state.cities) for (const inc of city.incidents) inc.marker = null;
+      if (state.enabled) { renderIncidents(); renderAgencies(); }
+    });
 
     return {
       id: 'crime',
@@ -551,12 +583,19 @@
           renderIncidents();
           updateStatusLine();
         } else {
+          clearTimeout(renderTimer);
+          if (cancelAdd) { cancelAdd(); cancelAdd = null; }
           cluster.clearLayers();
           if (map.hasLayer(cluster)) map.removeLayer(cluster);
           if (heat) { map.removeLayer(heat); heat = null; }
           agencyLayer.clearLayers();
           if (map.hasLayer(agencyLayer)) map.removeLayer(agencyLayer);
           legendBox.style.display = 'none';
+          totalLine.textContent = '';
+          for (const c of CFG.CRIME.categories) {
+            const elc = document.getElementById('crime-count-' + c.id);
+            if (elc) elc.textContent = '';
+          }
           setStatus('Off');
         }
       }

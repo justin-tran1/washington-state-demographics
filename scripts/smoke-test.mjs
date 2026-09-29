@@ -429,6 +429,66 @@ assert(/per 1,000/.test(agencyPopup) && /WASPC/.test(agencyPopup), 'agency popup
 await page.evaluate(() => { WAMAP.map.closePopup(); });
 const total = await page.locator('.crime-total').textContent();
 assert(/incidents in view/.test(total), 'viewport totals rendered: "' + total.trim() + '"');
+// One canvas for every vector layer: Leaflet hit-tests a canvas against its
+// own layers only, so a second canvas on top swallows the clicks below it.
+assert(await page.evaluate(() => document.querySelectorAll('.leaflet-overlay-pane canvas:not(.leaflet-heatmap-layer)').length) === 1,
+  'choropleth, transit and crime share one canvas');
+// Real clicks (not openPopup): the topmost shape under the pointer must get them.
+async function clickWhere(want) {
+  // Let a popup's auto-pan and the transit refresh it triggers finish first:
+  // the target is computed in pixels.
+  await page.evaluate(() => { WAMAP.map.closePopup(); });
+  await page.waitForTimeout(1500);
+  const pt = await page.evaluate(w => {
+    const map = WAMAP.map, R = map.options.renderer, size = map.getSize(), rect = map.getContainer().getBoundingClientRect();
+    const isRoute = l => l.feature && l.feature.properties && l.feature.properties.route_short_name === '40';
+    const isArea = l => l.feature && l.feature.properties && l.feature.properties.GEOID;
+    for (let y = 30; y < size.y - 30; y += 7) for (let x = 30; x < size.x - 30; x += 7) {
+      const p = map.containerPointToLayerPoint(L.point(x, y)); // canvas hit tests use layer points
+      const hits = Object.values(R._layers).filter(l => l.options.interactive !== false && l._containsPoint && l._containsPoint(p));
+      const ok = w === 'route' ? hits.some(isRoute) && !hits.some(l => l instanceof L.CircleMarker)
+        : hits.length && hits.every(isArea);
+      const el = ok && document.elementFromPoint(rect.left + x, rect.top + y);
+      if (el && el.tagName === 'CANVAS') return { x: rect.left + x, y: rect.top + y };
+    }
+    return null;
+  }, want);
+  if (!pt) return null;
+  await page.mouse.click(pt.x, pt.y);
+  await page.waitForTimeout(400);
+  return page.evaluate(() => { const c = document.querySelector('.leaflet-popup-content'); return c ? c.innerHTML : ''; });
+}
+const routeClick = await clickWhere('route');
+assert(routeClick && /Agency website/.test(routeClick), 'a click on a transit line opens its popup with crime circles drawn on top: ' + String(routeClick).replace(/\s+/g, ' ').slice(0, 120));
+// A pan (a popup's own auto-pan does the same) refreshes the routes; that
+// must not close the route popup the user is reading.
+await page.evaluate(() => { WAMAP.map.panBy([120, 0], { animate: false }); });
+await page.waitForTimeout(1800);
+assert(/Agency website/.test(await page.evaluate(() => { const c = document.querySelector('.leaflet-popup-content'); return c ? c.innerHTML : ''; })),
+  'the route popup stays open while the map pans and transit refreshes');
+const areaClick = await clickWhere('area');
+assert(areaClick && !/WASPC|Agency:/.test(areaClick), 'a click on a census area opens its profile with transit and crime on');
+await page.evaluate(() => { WAMAP.map.closePopup(); });
+// Rapid category toggles while ~18,000 pre-geocoded markers are still being
+// added must not leave stale or duplicate markers behind.
+await page.evaluate(() => { WAMAP.map.setView([47.3, -120.5], 7, { animate: false }); });
+for (let i = 0; i < 6; i++) { await page.locator('#crime-cat-theft').click(); await page.waitForTimeout(15); }
+await page.waitForTimeout(3000);
+const crimeMarkers = await page.evaluate(() => {
+  let n = 0;
+  WAMAP.map.eachLayer(l => {
+    if (!(l instanceof L.MarkerClusterGroup)) return;
+    const ls = l.getLayers();
+    if (ls.length && /crime-dot/.test(ls[0].options.icon.options.html)) n += ls.length;
+  });
+  let want = 0;
+  for (const c of WAMAP.CONFIG.CRIME.categories) want += +(document.getElementById('crime-count-' + c.id).textContent.replace(/\D/g, '') || 0);
+  return { n, want };
+});
+assert(crimeMarkers.n > 1000 && crimeMarkers.n === crimeMarkers.want,
+  `no duplicate crime markers after rapid toggles: ${crimeMarkers.n} markers for ${crimeMarkers.want} incidents`);
+await page.evaluate(() => { WAMAP.map.setView([47.6, -122.4], 11, { animate: false }); });
+await page.waitForTimeout(600);
 // Count check on Seattle alone: switch every other incident feed off.
 for (const id of await page.evaluate(() => WAMAP.CONFIG.CRIME.cities.map(c => c.id).filter(c => c !== 'seattle'))) {
   await page.locator('#crime-city-' + id).click();

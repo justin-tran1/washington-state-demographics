@@ -42,7 +42,7 @@ registries. A failed source never blocks the others: the last good file stays in
 | Layer | Source | Notes |
 |---|---|---|
 | Demographics & insurance | [U.S. Census Bureau ACS 5-Year](https://www.census.gov/programs-surveys/acs) table-based Summary Files (keyless) → `data/acs/` | The only dataset published for **every** census tract; newest vintage detected automatically. Insurance from detailed table **B27010** (uninsured lines / universe), equivalent to subject table S2701. Setting a `CENSUS_API_KEY` secret switches the build to the Census Data API |
-| Boundaries | [Census TIGERweb](https://tigerweb.geo.census.gov/arcgis/rest/services) generalized services → `data/geo/` | Tract and county polygons pre-built; live TIGERweb and `data/wa_counties.geojson` remain fallbacks |
+| Boundaries | [Census cartographic boundary files](https://www.census.gov/geographies/mapping-files/time-series/geo/cartographic-boundary.html) (500k, clipped to the shoreline) → `data/geo/` | Tract and county polygons pre-built; TIGERweb and `data/wa_counties.geojson` remain fallbacks |
 | Hospitals & clinics | WA DOH licensed hospitals; CMS Provider of Services (hospitals, CAHs, FQHCs, rural health clinics, surgery centers) via HRSA; VHA facilities; HRSA health center sites; WA DOH public health clinics; OSM | The previous live Overpass query was capped at 600 results per view and printed clinic nodes before hospital campuses, so hospitals were cut off first |
 | Pharmacies | WA DOH licensed pharmacies (HELMS) when available, else the NPPES NPI registry (Census-geocoded); OSM | OSM alone maps well under half of WA pharmacies |
 | Grocery | USDA SNAP-authorized retailers; OSM | |
@@ -78,8 +78,11 @@ Optional repository secrets: `CENSUS_API_KEY` (Census Data API instead of Summar
 - Crime points are reported offenses, not convictions; some records lack coordinates and are
   excluded (the layer says how many). In WASPC's statewide totals, theft includes
   motor-vehicle theft and fraud, and DUI / trespass (arrest-only offenses) are not counted.
-- Amenity points from different sources are de-duplicated by name and proximity; OSM
-  completeness still varies by area for restaurants and retail.
+- Amenity points from different sources are de-duplicated by name and proximity: distinctive
+  words must mostly agree (town names, health-system brands and store numbers do not count),
+  the radius widens for geocoded or centroid sources, and unnamed places never match by name.
+  Every hospital the merge drops is listed in the build log. OSM completeness still varies by
+  area for restaurants and retail.
 
 ## Architecture
 

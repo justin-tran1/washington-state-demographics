@@ -16,8 +16,10 @@
 
   WAMAP.createAmenities = function (opts) {
     const { map, card } = opts;
+    // Markers go in through U.addLayersChunked, which can be cancelled when a
+    // category is switched off mid-load (the plugin's chunkedLoading cannot).
     const cluster = L.markerClusterGroup({
-      chunkedLoading: true, maxClusterRadius: 46, disableClusteringAtZoom: 17,
+      chunkedLoading: false, maxClusterRadius: 46, disableClusteringAtZoom: 17,
       spiderfyOnMaxZoom: true, showCoverageOnHover: false
     });
     // "Featured" kinds (hospitals) are few and important, so they are never
@@ -28,7 +30,7 @@
     for (const c of CFG.AMENITIES) {
       state.cats.set(c.id, {
         cfg: c, on: CFG.AMENITIES_DEFAULT_ON.includes(c.id),
-        markers: [], featured: [], shown: false, data: null, promise: null, error: null
+        markers: [], featured: [], shown: false, partial: false, cancel: null, data: null, promise: null, error: null
       });
     }
 
@@ -108,7 +110,7 @@
         // Popups are rendered on demand: tens of thousands of markers would
         // otherwise each carry a pre-built HTML string.
         const m = L.marker([r[F.lat], r[F.lon]], {
-          icon: isFeatured ? ki.big : ki.small, keyboard: isFeatured, title: r[F.name] || ''
+          icon: isFeatured ? ki.big : ki.small, keyboard: isFeatured, title: r[F.name] || d.kinds[r[F.kind]] || ''
         }).bindPopup(() => popupHTML(cat, d, F, r), { maxWidth: 300 });
         (isFeatured ? cat.featured : cat.markers).push(m);
       }
@@ -134,12 +136,16 @@
 
     function sync(cat) {
       const show = !!(cat.on && cat.data);
-      if (show === !!cat.shown) return;
+      // `partial`: an add was interrupted (layer switched off) and must resume.
+      if (show === cat.shown && !(show && cat.partial && !cat.cancel)) return;
+      if (cat.cancel) { cat.cancel(); cat.cancel = null; }
       cat.shown = show;
       if (show) {
-        cluster.addLayers(cat.markers);
+        cat.partial = true;
+        cat.cancel = U.addLayersChunked(cluster, cat.markers, () => { cat.partial = false; cat.cancel = null; });
         cat.featured.forEach(m => featuredLayer.addLayer(m));
       } else {
+        cat.partial = false;
         cluster.removeLayers(cat.markers);
         cat.featured.forEach(m => featuredLayer.removeLayer(m));
       }
@@ -203,6 +209,7 @@
           refresh();
         } else {
           token++;
+          for (const [, cat] of state.cats) if (cat.cancel) { cat.cancel(); cat.cancel = null; } // resumed on the next enable
           map.removeLayer(cluster);
           map.removeLayer(featuredLayer);
           setStatus('Off');
