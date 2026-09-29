@@ -11,7 +11,7 @@
 //    Office, Auburn PD), geocoded with the Census batch geocoder. Feeds that
 //    do publish coordinates are queried live by the browser instead.
 
-import { fetchJSON, fetchText, readJSON, writeJSON, log, round, inWA, geocodeBatch, qs, socrataAll, unzipText, parseGazetteer } from './lib.mjs';
+import { fetchJSON, fetchText, readJSON, writeJSON, log, round, inWA, geocodeBatch, qs, socrataAll, unzipText, parseGazetteer, waPlaces, parsePacific } from './lib.mjs';
 
 const WASPC_DATASET = 'https://data.wa.gov/resource/vvfu-ry7f.json';
 const WASPC_PAGE = 'https://data.wa.gov/Public-Safety/Washington-State-Uniform-Crime-Reporting-National-/vvfu-ry7f';
@@ -47,27 +47,6 @@ const SPECIAL_PLACES = [
   [/^western washington university/i, 'Bellingham'], [/^evergreen state college/i, 'Olympia'], [/^port of seattle/i, 'SeaTac'],
   [/^snohomish auto theft/i, 'Everett']
 ];
-
-/** Census place internal points for Washington, newest Gazetteer vintage. */
-async function waPlaces() {
-  const now = new Date().getUTCFullYear();
-  for (let y = now; y >= now - 4; y--) {
-    try {
-      const text = await fetchText(`https://www2.census.gov/geo/docs/maps-data/data/gazetteer/${y}_Gazetteer/${y}_gaz_place_53.txt`, {}, { retries: 1, timeoutMs: 60000 });
-      const rows = parseGazetteer(text);
-      // A missing vintage can come back as an HTML page with status 200.
-      if (!rows.length || !('NAME' in rows[0]) || !('INTPTLAT' in rows[0])) throw new Error('not a Gazetteer place file');
-      const places = [];
-      for (const r of rows) {
-        if (!r.NAME) continue;
-        const base = r.NAME.replace(/ (city|town|CDP|village)$/i, '');
-        places.push({ name: r.NAME, base, k: key(base), incorporated: r.LSAD !== '57', lat: +r.INTPTLAT, lon: +r.INTPTLONG });
-      }
-      if (places.length > 500) { log(`gazetteer ${y}: ${places.length} WA places`); return { year: y, places }; }
-    } catch (err) { log(`gazetteer ${y}: ${err.message}`); }
-  }
-  throw new Error('no Census place gazetteer found');
-}
 
 /** Census American Indian / Alaska Native areas in Washington (reservations and trust land). */
 async function waTribalAreas(year) {
@@ -105,7 +84,8 @@ async function buildAgencies(outDir) {
   if (cur.length < 150) throw new Error(`only ${cur.length} WASPC rows for ${year}`);
   const prevTotal = new Map(prev.map(r => [`${r.county}|${r.location}`, +r.total]));
 
-  const { year: gazYear, places } = await waPlaces();
+  const { year: gazYear, places: gaz } = await waPlaces();
+  const places = gaz.map(p => ({ ...p, k: key(p.base) }));
   const tribal = await waTribalAreas(gazYear);
   const placeByKey = new Map();
   for (const p of places) if (!placeByKey.has(p.k) || p.incorporated) placeByKey.set(p.k, p);
@@ -206,7 +186,7 @@ async function writeIncidents(outDir, id, meta, incidents) {
   const idx = (list, map, v) => { if (!map.has(v)) { map.set(v, list.length); list.push(v); } return map.get(v); };
   const rows = [];
   for (const i of incidents.sort((a, b) => a.t - b.t)) {
-    if (i.t < from.getTime()) continue;
+    if (!isFinite(i.t) || i.t < from.getTime()) continue;
     rows.push([round(i.lat), round(i.lon), Math.round((i.t - from.getTime()) / 60000), idx(offs, offIdx, i.offense), idx(addrs, addrIdx, i.addr || '')]);
   }
   const bytes = await writeJSON(`${outDir}/crime/${id}.json`, {
@@ -247,8 +227,9 @@ async function buildKCSO(outDir) {
     $select: 'case_number,incident_datetime,nibrs_code_name,block_address,city,zip',
     $where: `incident_datetime >= '${since}'`, $order: 'incident_datetime'
   });
+  // Socrata timestamps carry no offset: they are Washington wall-clock time.
   const list = rows.filter(r => r.incident_datetime && r.nibrs_code_name).map(r => ({
-    t: Date.parse(r.incident_datetime + (/[zZ]|[+-]\d\d:?\d\d$/.test(r.incident_datetime) ? '' : '-07:00')),
+    t: parsePacific(r.incident_datetime),
     offense: r.nibrs_code_name, addr: r.block_address, city: r.city, zip: r.zip
   }));
   if (list.length < 5000) throw new Error(`only ${list.length} KCSO offenses in the last year`);
@@ -272,7 +253,7 @@ async function buildAuburn(outDir) {
   });
   const list = rows.filter(r => r.offense && r.reported && !AUBURN_NON_CRIME.test(r.offense.trim()))
     // The feed mixes "Theft" and "THEFT"; unify, but keep acronyms such as DUI.
-    .map(r => ({ t: Date.parse(r.reported), offense: r.offense.trim().replace(/^[A-Z ]{5,}$/, s => s[0] + s.slice(1).toLowerCase()), addr: r.address, city: 'Auburn' }));
+    .map(r => ({ t: parsePacific(r.reported), offense: r.offense.trim().replace(/^[A-Z ]{5,}$/, s => s[0] + s.slice(1).toLowerCase()), addr: r.address, city: 'Auburn' }));
   if (list.length < 2000) throw new Error(`only ${list.length} Auburn crime reports in the last year`);
   const located = await geocodeIncidents(list, 'Auburn', [47.2, -122.4, 47.4, -122.05]);
   if (located.length < list.length * 0.5) throw new Error(`only ${located.length}/${list.length} Auburn reports geocoded`);

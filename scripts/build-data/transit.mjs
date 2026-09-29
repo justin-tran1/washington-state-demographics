@@ -5,7 +5,8 @@
 // website, and its stop layer carries no agency at all. This step writes
 // data/transit/agencies.json with:
 //   agencies: normAgency(name) -> { name, url, source }
-//   prefixes: route_id/stop_id prefix (e.g. "KCM") -> normAgency(name)
+//   prefixes: route_id/stop_id prefix (e.g. "KCM") -> normAgency(name), for
+//             prefixes whose routes (nearly) all belong to one agency
 // Agency websites come from each agency's own GTFS agency.txt (agency_url),
 // located through the Mobility Database feed catalog; when a feed cannot be
 // matched, the most common origin of the agency's own route_url pages is used.
@@ -48,12 +49,20 @@ export const normAgency = s => String(s || '').toLowerCase()
 const okUrl = u => /^https?:\/\/[^\s/]+\.[a-z]{2,}/i.test(u || '');
 const withScheme = u => (u && !/^https?:\/\//i.test(u) ? 'https://' + u : u);
 const tokens = s => new Set(normAgency(s).split(' ').filter(w => w.length > 2 && !/^(transit|transportation|authority|public|county|city|system|area|district|of)$/.test(w)));
+/**
+ * Names that mostly share words. Overlap is measured against the LONGER
+ * name: "Columbia Area Transit" shares one word of three with "Lower
+ * Columbia CAP", and "City of Seattle" is not "Seattle Children's Hospital".
+ */
 function similar(a, b) {
   const A = tokens(a), B = tokens(b);
   if (!A.size || !B.size) return false;
   let n = 0; for (const w of A) if (B.has(w)) n++;
-  return n / Math.min(A.size, B.size) >= 0.6;
+  return n / Math.max(A.size, B.size) >= 0.6;
 }
+// A route_url on a file host or CDN (a schedule PDF) says nothing about the
+// agency's own website.
+const FILE_HOST = /(^|\.)(wsimg\.com|amazonaws\.com|cloudfront\.net|googleusercontent\.com|googleapis\.com|google\.com|dropbox\.com|box\.com|sharepoint\.com|1drv\.ms|onedrive\.live\.com|windows\.net|azureedge\.net|squarespace-cdn\.com|wixstatic\.com|filesusr\.com|cdn\.[a-z0-9.-]+|hubspotusercontent[a-z0-9-]*\.net|bit\.ly|tinyurl\.com)$/i;
 
 /** agency.txt rows out of one GTFS zip. */
 async function readAgencies(url) {
@@ -72,7 +81,7 @@ export async function buildTransit(outDir) {
   // 1. Agencies and id prefixes as the map's route layer names them.
   const { features } = await arcgisAll(ROUTES, { outFields: 'agency_id,agency_name,route_id,route_url', returnGeometry: false });
   const agencies = {};   // norm -> { name, url, source }
-  const prefixes = {};   // "KCM" -> norm
+  const prefixRoutes = {}; // "KCM" -> { norm: route count }
   const routeOrigins = {}; // norm -> { origin: count }
   for (const f of features) {
     const a = f.attributes;
@@ -80,14 +89,32 @@ export async function buildTransit(outDir) {
     const key = normAgency(a.agency_name);
     agencies[key] = agencies[key] || { name: a.agency_name, url: null, source: null };
     const pre = String(a.route_id || '').split('_')[0];
-    if (pre && pre !== a.route_id) prefixes[pre] = key;
-    if (okUrl(withScheme(a.route_url))) {
-      const o = new URL(withScheme(a.route_url)).origin;
-      routeOrigins[key] = routeOrigins[key] || {};
-      routeOrigins[key][o] = (routeOrigins[key][o] || 0) + 1;
+    if (pre && pre !== a.route_id) {
+      prefixRoutes[pre] = prefixRoutes[pre] || {};
+      prefixRoutes[pre][key] = (prefixRoutes[pre][key] || 0) + 1;
+    }
+    const u = withScheme(a.route_url);
+    if (okUrl(u)) {
+      const o = new URL(u);
+      if (!FILE_HOST.test(o.hostname)) {
+        routeOrigins[key] = routeOrigins[key] || {};
+        routeOrigins[key][o.origin] = (routeOrigins[key][o.origin] || 0) + 1;
+      }
     }
   }
-  log(`route layer: ${features.length} routes, ${Object.keys(agencies).length} agencies, ${Object.keys(prefixes).length} id prefixes`);
+  // A feed can carry other agencies' routes (King County Metro's has Sound
+  // Transit Express under KCM_ ids), so a prefix names an agency only when
+  // that agency runs at least 80% of its routes; stops are labelled by it.
+  const prefixes = {};   // "KCM" -> norm
+  const ambiguous = [];
+  for (const [pre, byAgency] of Object.entries(prefixRoutes)) {
+    const [top, n] = Object.entries(byAgency).sort((x, y) => y[1] - x[1])[0];
+    const total = Object.values(byAgency).reduce((a, b) => a + b, 0);
+    if (n / total >= 0.8) prefixes[pre] = top;
+    else ambiguous.push(`${pre} (${Object.entries(byAgency).map(([k, v]) => `${k} ${v}`).join(', ')})`);
+  }
+  log(`route layer: ${features.length} routes, ${Object.keys(agencies).length} agencies, ${Object.keys(prefixes).length} id prefixes` +
+    (ambiguous.length ? `; ambiguous prefixes left unmapped: ${ambiguous.join('; ')}` : ''));
 
   // 2. agency_url from every active Washington GTFS feed in the catalog.
   const gtfsAgencies = [];
@@ -143,5 +170,6 @@ export async function buildTransit(outDir) {
     source: 'WSDOT TransitData routes (agency_name, route_id) + agency GTFS feeds via the Mobility Database catalog',
     agencies, prefixes
   });
-  return { routes: features.length, agencies: Object.keys(agencies).length, withUrl, prefixes: Object.keys(prefixes).length, gtfsAgencies: gtfsAgencies.length, bytes };
+  return { routes: features.length, agencies: Object.keys(agencies).length, withUrl, prefixes: Object.keys(prefixes).length,
+    ambiguousPrefixes: ambiguous.length, gtfsAgencies: gtfsAgencies.length, bytes };
 }
