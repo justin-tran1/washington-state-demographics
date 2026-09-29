@@ -143,7 +143,18 @@ async function geoAttributes(y) {
 }
 
 async function gazetteer(gy) {
-  const base = `https://www2.census.gov/geo/docs/maps-data/data/gazetteer/${gy}_Gazetteer`;
+  const dir = `https://www2.census.gov/geo/docs/maps-data/data/gazetteer/${gy}_Gazetteer/`;
+  // File naming has varied between vintages (case, national vs per-state,
+  // .txt vs .zip), so discover the real names from the directory listing.
+  const listing = await fetchText(dir);
+  const files = [...new Set([...listing.matchAll(/href="([^"]+\.(?:txt|zip))"/gi)].map(m => m[1]))];
+  const find = re => files.find(f => re.test(f));
+  const countyFile = find(/gaz_counties_national\.txt$/i) || find(/gaz_counties_national\.zip$/i);
+  const tractFile = find(new RegExp(`gaz_tracts_${WA_FIPS}\\.txt$`, 'i')) || find(/gaz_tracts_national\.txt$/i)
+    || find(/gaz_tracts_national\.zip$/i);
+  if (!countyFile || !tractFile) throw new Error(`county/tract files not listed (saw: ${files.slice(0, 12).join(', ')})`);
+  log(`Gazetteer ${gy}: using ${countyFile}, ${tractFile}`);
+  const load = async name => (/\.zip$/i.test(name) ? unzipText(dir + name) : fetchText(dir + name));
   const parse = text => {
     const lines = text.split(/\r?\n/).filter(Boolean);
     const head = lines[0].split('\t').map(h => h.trim());
@@ -153,19 +164,30 @@ async function gazetteer(gy) {
     });
   };
   const out = { county: {}, tract: {} };
-  const counties = parse(await fetchText(`${base}/${gy}_Gaz_counties_national.txt`))
-    .filter(r => r.GEOID && r.GEOID.startsWith(WA_FIPS));
-  for (const r of counties) {
+  for (const r of parse(await load(countyFile))) {
+    if (!r.GEOID || !r.GEOID.startsWith(WA_FIPS)) continue;
     out.county[r.GEOID] = { name: r.NAME, aland: +r.ALAND, lat: round(+r.INTPTLAT), lon: round(+r.INTPTLONG) };
   }
-  const tracts = parse(await fetchText(`${base}/${gy}_Gaz_tracts_${WA_FIPS}.txt`));
-  for (const r of tracts) {
+  for (const r of parse(await load(tractFile))) {
+    if (!r.GEOID || !r.GEOID.startsWith(WA_FIPS)) continue;
     out.tract[r.GEOID] = { name: tractName(r.GEOID), aland: +r.ALAND, lat: round(+r.INTPTLAT), lon: round(+r.INTPTLONG) };
   }
   if (Object.keys(out.county).length !== 39) throw new Error(`expected 39 counties, got ${Object.keys(out.county).length}`);
   if (Object.keys(out.tract).length < 1500) throw new Error(`only ${Object.keys(out.tract).length} tracts`);
   log(`Gazetteer ${gy}: ${Object.keys(out.county).length} counties, ${Object.keys(out.tract).length} tracts`);
   return out;
+}
+
+/** Download a zip and return the text of its single .txt member (runner has unzip). */
+async function unzipText(url) {
+  const { execFileSync } = await import('node:child_process');
+  const { writeFile, mkdtemp } = await import('node:fs/promises');
+  const { tmpdir } = await import('node:os');
+  const res = await fetchRetry(url);
+  if (!res.ok) throw new Error(`HTTP ${res.status} for ${url}`);
+  const d = await mkdtemp(`${tmpdir()}/gaz-`);
+  await writeFile(`${d}/f.zip`, Buffer.from(await res.arrayBuffer()));
+  return execFileSync('unzip', ['-p', `${d}/f.zip`], { maxBuffer: 1 << 30 }).toString('latin1');
 }
 
 /** Fallback: land area + internal point from TIGERweb, choosing whichever
@@ -178,7 +200,8 @@ async function tigerAttributes(y) {
     let root = TIGERWEB(y);
     let info = await fetchJSON(`${root}/${svc[level]}?f=json`).catch(() => null);
     if (!info || info.error) { root = TIGERWEB(y - 1); info = await fetchJSON(`${root}/${svc[level]}?f=json`); }
-    const layer = (info.layers || []).find(l => want[level].test(l.name));
+    // Skip group layers: they share the name but have no fields to query.
+    const layer = (info.layers || []).find(l => want[level].test(l.name) && !(l.subLayerIds && l.subLayerIds.length));
     if (!layer) throw new Error(`TIGERweb ${level} layer not found`);
     const layerUrl = `${root}/${svc[level]}/${layer.id}`;
     const linfo = await fetchJSON(`${layerUrl}?f=json`);

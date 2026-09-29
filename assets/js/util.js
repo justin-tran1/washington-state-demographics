@@ -479,27 +479,28 @@
   }
   const geocode = {
     async search(query) {
+      const G = CFG.GEOCODE;
       const results = [];
-      const looksLikeAddress = /\d/.test(query);
-      if (looksLikeAddress) {
-        try {
-          const G = CFG.GEOCODE;
-          const q = /washington|,\s*wa\b|\bwa\s*$|\d{5}/i.test(query) ? query : query + ', WA';
-          const data = await fetchJSON(G.censusUrl + '?' + qs({
-            address: q, benchmark: G.censusBenchmark, format: 'json'
-          }), { timeout: 20000 });
-          for (const m of ((data.result || {}).addressMatches || []).slice(0, 5)) {
-            results.push({
-              label: m.matchedAddress, lat: m.coordinates.y, lon: m.coordinates.x,
-              source: 'U.S. Census Geocoder'
-            });
-          }
-        } catch (e) { /* fall through to Nominatim */ }
-      }
+      const inWA = (lat, lon) => lat >= 45.4 && lat <= 49.1 && lon >= -124.9 && lon <= -116.8;
+      // Primary: Esri World Geocoder - rooftop-level US addresses and named
+      // places, restricted to Washington's extent.
+      try {
+        const data = await fetchJSON(G.esriFind + '?' + qs({
+          SingleLine: query, f: 'json', maxLocations: 8, countryCode: 'USA',
+          searchExtent: G.esriExtent, outFields: 'Match_addr,Addr_type,Region'
+        }), { timeout: 15000 });
+        for (const c of (data.candidates || [])) {
+          const lat = c.location && c.location.y, lon = c.location && c.location.x;
+          if (lat == null || !inWA(lat, lon) || c.score < 70) continue;
+          const region = c.attributes && c.attributes.Region;
+          if (region && !/washington/i.test(region)) continue;
+          results.push({ label: c.address, lat, lon, source: 'Esri World Geocoder', score: c.score });
+        }
+      } catch (e) { /* fall through to Nominatim */ }
       if (!results.length) {
-        const data = await nominatim(CFG.GEOCODE.nominatimSearch, {
+        const data = await nominatim(G.nominatimSearch, {
           q: query, format: 'jsonv2', addressdetails: 0, limit: 8,
-          viewbox: CFG.GEOCODE.viewbox, bounded: 1, countrycodes: 'us'
+          viewbox: G.viewbox, bounded: 1, countrycodes: 'us'
         });
         for (const m of data) {
           results.push({ label: m.display_name, lat: +m.lat, lon: +m.lon, source: 'OpenStreetMap Nominatim' });

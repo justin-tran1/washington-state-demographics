@@ -287,13 +287,18 @@
   ];
 
   // -------------------------------------------------------------- geocoding
+  // Address search. The U.S. Census geocoder was dropped from the browser
+  // path: it sends no Access-Control-Allow-Origin header, so browsers can
+  // never read its responses and every search silently fell back. Esri's
+  // World Geocoder answers keyless with CORS for display (non-stored) use.
   const GEOCODE = {
-    censusUrl: 'https://geocoding.geo.census.gov/geocoder/locations/onelineaddress',
-    censusBenchmark: 'Public_AR_Current',
+    esriFind: 'https://geocode.arcgis.com/arcgis/rest/services/World/GeocodeServer/findAddressCandidates',
     nominatimSearch: 'https://nominatim.openstreetmap.org/search',
     nominatimReverse: 'https://nominatim.openstreetmap.org/reverse',
     // west,north,east,south per Nominatim viewbox convention (left,top,right,bottom)
     viewbox: '-124.85,49.01,-116.90,45.53',
+    // xmin,ymin,xmax,ymax for Esri's searchExtent
+    esriExtent: '-124.85,45.53,-116.90,49.01',
     minIntervalMs: 1100
   };
 
