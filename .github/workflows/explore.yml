@@ -1,13 +1,16 @@
 name: Explore data sources (temporary)
 on:
   push:
-    paths: ['scripts/explore-sources.sh', '.github/workflows/explore.yml']
+    paths: ['scripts/explore.mjs', '.github/workflows/explore.yml']
 permissions:
   contents: read
 jobs:
   explore:
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 40
     steps:
       - uses: actions/checkout@v4
-      - run: bash scripts/explore-sources.sh
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - run: node scripts/explore.mjs
