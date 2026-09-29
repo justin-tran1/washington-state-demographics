@@ -1,6 +1,6 @@
-// Temporary exploration probe (removed before merge). Prints compact facts
-// about candidate data sources so the build scripts can target them exactly.
-import { fetchRetry, fetchJSON, fetchText, qs, overpass, WA_AREA } from './build-data/lib.mjs';
+// Temporary exploration probe (removed before merge). Round 2: crime feeds,
+// pharmacy / credit-union / park sources, Census place gazetteer.
+import { fetchRetry, fetchJSON, fetchText, qs } from './build-data/lib.mjs';
 
 const out = (...a) => console.log(...a);
 const sec = s => out(`\n=================== ${s}`);
@@ -8,158 +8,141 @@ const tryJSON = async (url, init) => {
   try { return await fetchJSON(url, init, { retries: 1, timeoutMs: 60000 }); }
   catch (e) { return { __err: e.message }; }
 };
-const fieldNames = info => (info.fields || []).map(f => f.name).join(',');
+const fieldNames = info => (info.fields || []).map(f => `${f.name}:${(f.type || '').replace('esriFieldType', '')}`).join(',');
 
-async function arcLayer(label, url, where) {
+async function arcLayer(label, url, where, orderBy, outFields = '*') {
   const info = await tryJSON(`${url}?f=json`);
   if (info.__err || info.error) { out(`${label}: ${info.__err || JSON.stringify(info.error).slice(0, 200)}`); return; }
-  out(`${label}: name=${info.name} type=${info.geometryType} max=${info.maxRecordCount} pag=${info.advancedQueryCapabilities && info.advancedQueryCapabilities.supportsPagination}`);
+  out(`${label}: name=${info.name} type=${info.geometryType} max=${info.maxRecordCount} extent=${JSON.stringify(info.extent || {}).slice(0, 160)}`);
   out(`  fields: ${fieldNames(info)}`);
-  if (where) {
-    const c = await tryJSON(`${url}/query?${qs({ where, returnCountOnly: true, f: 'json' })}`);
-    out(`  count(${where}) = ${JSON.stringify(c).slice(0, 200)}`);
-    const s = await tryJSON(`${url}/query?${qs({ where, outFields: '*', resultRecordCount: 1, returnGeometry: true, outSR: 4326, f: 'json' })}`);
-    if (s.features && s.features[0]) out(`  sample: ${JSON.stringify(s.features[0]).slice(0, 700)}`);
-    else out(`  sample: ${JSON.stringify(s).slice(0, 300)}`);
-  }
+  const c = await tryJSON(`${url}/query?${qs({ where: where || '1=1', returnCountOnly: true, f: 'json' })}`);
+  out(`  count(${where || '1=1'}) = ${JSON.stringify(c).slice(0, 120)}`);
+  const s = await tryJSON(`${url}/query?${qs({ where: where || '1=1', outFields, resultRecordCount: 2, returnGeometry: true, outSR: 4326, f: 'json', ...(orderBy ? { orderByFields: orderBy } : {}) })}`);
+  if (s.features && s.features[0]) s.features.forEach(f => out(`  sample: ${JSON.stringify(f).slice(0, 600)}`));
+  else out(`  sample: ${JSON.stringify(s).slice(0, 300)}`);
 }
-
 async function arcService(label, url) {
   const info = await tryJSON(`${url}?f=json`);
   if (info.__err || info.error) { out(`${label}: ${info.__err || JSON.stringify(info.error).slice(0, 200)}`); return null; }
   out(`${label}: layers=${(info.layers || []).map(l => `${l.id}:${l.name}`).join(' | ')} tables=${(info.tables || []).map(l => `${l.id}:${l.name}`).join(' | ')}`);
   return info;
 }
-
-async function item(label, id) {
-  const it = await tryJSON(`https://www.arcgis.com/sharing/rest/content/items/${id}?f=json`);
-  out(`${label} item ${id}: title=${it.title} type=${it.type} url=${it.url} modified=${it.modified && new Date(it.modified).toISOString()} ${it.__err || (it.error && it.error.message) || ''}`);
-  return it;
-}
-
-// ------------------------------------------------------------------- health
-sec('HRSA gisportal roots');
-for (const root of ['https://gisportal.hrsa.gov/server/rest/services', 'https://gisportal.hrsa.gov/arcgis/rest/services']) {
-  const r = await tryJSON(`${root}/HealthCareFacilities?f=json`);
-  out(`${root}/HealthCareFacilities -> ${r.__err || (r.error && r.error.message) || (r.services || []).map(s => s.name + ':' + s.type).join(', ')}`);
-}
-const HRSA = 'https://gisportal.hrsa.gov/server/rest/services/HealthCareFacilities';
-const cms = await arcService('CMSApprovedFacilities_FS', `${HRSA}/CMSApprovedFacilities_FS/MapServer`);
-if (cms) for (const l of cms.layers || []) await arcLayer(`  CMS layer ${l.id} ${l.name}`, `${HRSA}/CMSApprovedFacilities_FS/MapServer/${l.id}`, "CMS_PROVIDER_STATE_ABBR='WA'");
-const phc = await arcService('PrimaryHealthCareFacilities_FS', `${HRSA}/PrimaryHealthCareFacilities_FS/MapServer`);
-if (phc) await arcLayer('  PHC layer 0', `${HRSA}/PrimaryHealthCareFacilities_FS/MapServer/0`, "SITE_STATE_ABBR='WA'");
-const vha = await arcService('VHAFacilities_FS', `${HRSA}/VHAFacilities_FS/MapServer`);
-if (vha) await arcLayer('  VHA layer 0', `${HRSA}/VHAFacilities_FS/MapServer/0`, '1=1');
-
-sec('WA DOH items');
-for (const [label, id] of [['DOH Hospitals', '626cb2ca35c64ea1a2ac502c573e3ec9'], ['DOH Tribal clinics', '4df352f9a9a6480a991624e4aa216728']]) {
-  const it = await item(label, id);
-  if (it && it.url) {
-    const svc = await arcService(`  ${label} service`, it.url.replace(/\/\d+$/, ''));
-    const lid = /\/\d+$/.test(it.url) ? '' : '/0';
-    await arcLayer(`  ${label} layer`, it.url + lid, '1=1');
+async function soc(label, domain, id, order, where) {
+  const meta = await tryJSON(`${domain}/api/views/${id}.json`);
+  out(`${label}: ${meta.__err || `name=${meta.name} rowsUpdated=${meta.rowsUpdatedAt && new Date(meta.rowsUpdatedAt * 1000).toISOString()} cols=${(meta.columns || []).map(c => `${c.fieldName}:${c.dataTypeName}`).join(',')}`}`);
+  const rows = await tryJSON(`${domain}/resource/${id}.json?${qs({ $limit: 3, ...(order ? { $order: `${order} DESC` } : {}), ...(where ? { $where: where } : {}) })}`);
+  out(`  rows: ${JSON.stringify(rows).slice(0, 1400)}`);
+  if (order) {
+    const cnt = await tryJSON(`${domain}/resource/${id}.json?${qs({ $select: 'count(*) as n', $where: `${order} >= '2025-09-29T00:00:00'` })}`);
+    out(`  last-12-month count: ${JSON.stringify(cnt).slice(0, 200)}`);
   }
-}
-const doh = await tryJSON(`https://services8.arcgis.com/rGGrs6HCnw87OFOT/arcgis/rest/services?f=json`);
-out(`DOH org services: ${doh.__err || (doh.services || []).map(s => s.name).filter(n => /hosp|clinic|rhc|thc|fqhc|health|pharm|urgent/i.test(n)).join(', ')}`);
-
-sec('HIFLD (expected dead)');
-await arcLayer('HIFLD Hospitals_1', 'https://services1.arcgis.com/Hp6G80Pky0om7QvQ/arcgis/rest/services/Hospitals_1/FeatureServer/0', "STATE='WA'");
-
-sec('CMS hospital general info (data.cms.gov provider data)');
-const hgi = await tryJSON('https://data.cms.gov/provider-data/api/1/datastore/query/xubh-q36u/0?limit=2&conditions[0][property]=state&conditions[0][value]=WA&conditions[0][operator]==&count=true&results=true');
-out(hgi.__err || `count=${hgi.count} sample=${JSON.stringify((hgi.results || [])[0]).slice(0, 500)}`);
-
-// ------------------------------------------------------------------ commerce
-sec('FDIC locations');
-for (const base of ['https://api.fdic.gov/banks/locations', 'https://banks.data.fdic.gov/api/locations']) {
-  const d = await tryJSON(`${base}?${qs({ filters: 'STALP:WA', limit: 1, format: 'json' })}`);
-  out(`${base}: ${d.__err || `total=${d.meta && d.meta.total} keys=${Object.keys((d.data && d.data[0] && d.data[0].data) || {}).join(',')}`}`);
-}
-sec('NCUA credit unions');
-for (const u of ['https://mapping.ncua.gov/api/Search/GetSearchLocations?address=Seattle%2C%20WA&type=address&radius=25',
-  'https://ncua.gov/analysis/credit-union-corporate-call-report-data/quarterly-data']) {
-  try { const r = await fetchRetry(u, {}, { retries: 0, timeoutMs: 30000 }); out(`${u} -> ${r.status} ${(await r.text()).slice(0, 300).replace(/\s+/g, ' ')}`); }
-  catch (e) { out(`${u} -> ${e.message}`); }
-}
-sec('SNAP retailers');
-const snapSearch = await tryJSON(`https://www.arcgis.com/sharing/rest/search?${qs({ q: 'SNAP retailer locations owner:USDA_FNS OR title:"SNAP Retailer"', num: 10, f: 'json' })}`);
-for (const r of snapSearch.results || []) out(`  ${r.id} | ${r.title} | ${r.type} | ${r.owner} | ${r.url}`);
-await arcLayer('SNAP guessed', 'https://services1.arcgis.com/RLQu0rK7h4kbsBq5/arcgis/rest/services/snap_retailer_location_data/FeatureServer/0', "State='WA'");
-
-sec('NREL alt fuel (DEMO_KEY)');
-const nrel = await tryJSON(`https://developer.nrel.gov/api/alt-fuel-stations/v1.json?${qs({ api_key: 'DEMO_KEY', state: 'WA', status: 'E', access: 'public', limit: 1 })}`);
-out(nrel.__err || `total=${nrel.total_results} keys=${Object.keys((nrel.fuel_stations || [])[0] || {}).slice(0, 40).join(',')}`);
-
-sec('NCES EDGE services');
-for (const f of ['K12_School_Locations', 'Postsecondary_School_Locations']) {
-  const l = await tryJSON(`https://nces.ed.gov/opengis/rest/services/${f}?f=json`);
-  out(`${f}: ${l.__err || (l.services || []).map(s => s.name.split('/').pop()).join(', ')}`);
-}
-
-sec('Overpass statewide counts');
-const SEL = {
-  hospital: ['["amenity"="hospital"]', '["healthcare"="hospital"]'],
-  clinic: ['["amenity"="clinic"]', '["healthcare"="clinic"]', '["healthcare"="centre"]'],
-  doctors: ['["amenity"="doctors"]', '["healthcare"="doctor"]'],
-  pharmacy: ['["amenity"="pharmacy"]', '["healthcare"="pharmacy"]'],
-  restaurants: ['["amenity"~"^(restaurant|cafe|fast_food|food_court|ice_cream|bar|pub|biergarten)$"]', '["shop"~"^(bakery|coffee|pastry|confectionery)$"]'],
-  retail: ['["shop"]["shop"!~"^(supermarket|grocery|greengrocer|convenience|health_food|butcher|deli|bakery|coffee|pastry|confectionery|car|car_repair|car_parts|motorcycle|tyres|vacant|no|yes|fuel)$"]'],
-  banks: ['["amenity"="bank"]'],
-  fuel: ['["amenity"="fuel"]'],
-  charging: ['["amenity"="charging_station"]'],
-  parks: ['["leisure"~"^(park|playground|nature_reserve|garden|recreation_ground|dog_park)$"]']
-};
-for (const [k, sels] of Object.entries(SEL)) {
-  const t0 = Date.now();
-  try {
-    const d = await overpass(`[out:json][timeout:200];${WA_AREA}(${sels.map(s => `nwr${s}(area.wa);`).join('')});out count;`);
-    const c = (d.elements || [])[0];
-    out(`${k}: ${JSON.stringify(c && c.tags)} (${((Date.now() - t0) / 1000).toFixed(0)}s)`);
-  } catch (e) { out(`${k}: ${e.message}`); }
 }
 
 // --------------------------------------------------------------------- crime
-sec('FBI NIBRS bulk state files');
-for (const y of [2024, 2023]) {
-  for (const u of [`https://s3-us-gov-west-1.amazonaws.com/cg-d4b776d0-d898-4153-90c8-8336f86bdfec/${y}/WA-${y}.zip`,
-    `https://cde.ucr.cjis.gov/LATEST/s3/signedurl?key=nibrs/annual/WA-${y}.zip`]) {
-    try { const r = await fetchRetry(u, { method: 'HEAD' }, { retries: 0, timeoutMs: 30000 }); out(`${u} -> ${r.status} len=${r.headers.get('content-length')} type=${r.headers.get('content-type')}`); }
-    catch (e) { out(`${u} -> ${e.message}`); }
-  }
-}
-sec('FBI CDE API (DEMO_KEY)');
-for (const p of ['summarized/state/WA/violent-crime?from=01-2024&to=12-2024',
-  'summarized/agency/WASPD0000/all?from=01-2024&to=12-2024',
-  'agency/byStateAbbr/WA']) {
-  const d = await tryJSON(`https://api.usa.gov/crime/fbi/cde/${p}${p.includes('?') ? '&' : '?'}API_KEY=DEMO_KEY`);
-  out(`${p}: ${JSON.stringify(d).slice(0, 600)}`);
-}
-sec('Socrata catalog: WA crime datasets');
-for (const q of ['crime', 'police incidents', 'offense', 'NIBRS', 'calls for service']) {
-  const d = await tryJSON(`https://api.us.socrata.com/api/catalog/v1?${qs({ q, only: 'dataset', limit: 100 })}`);
-  for (const r of d.results || []) {
-    const dom = r.metadata && r.metadata.domain;
-    if (!/wa\.gov|seattle|kingcounty|tacoma|spokane|bellevue|everett|redmond|kent|renton|olympia|vancouver|bellingham|pierce|snohomish|clark|thurston|yakima|kirkland|auburn|federalway|lakewood/i.test(dom || '')) continue;
-    out(`  [${q}] ${dom} ${r.resource.id} | ${r.resource.name} | updated ${r.resource.data_updated_at} | cols ${(r.resource.columns_field_name || []).slice(0, 25).join(',')}`);
-  }
-}
-sec('ArcGIS Online search: WA crime layers');
-for (const q of ['crime Washington', 'police incidents Washington', 'crime Spokane', 'crime Tacoma', 'crime Everett', 'crime Vancouver WA', 'crime Bellingham', 'crime Olympia', 'crime Kent WA', 'crime Renton', 'crime Pierce County', 'crime Snohomish County', 'crime Yakima', 'crime Redmond', 'crime Bellevue', 'crime Kirkland', 'police offenses Tacoma']) {
-  const d = await tryJSON(`https://www.arcgis.com/sharing/rest/search?${qs({ q: `${q} type:"Feature Service"`, num: 20, f: 'json', sortField: 'modified', sortOrder: 'desc' })}`);
-  for (const r of d.results || []) out(`  [${q}] ${r.id} | ${r.title} | ${r.owner} | mod ${new Date(r.modified).toISOString().slice(0, 10)} | ${r.url}`);
-}
-sec('data.wa.gov NIBRS search');
-const wa = await tryJSON(`https://data.wa.gov/api/catalog/v1?${qs({ q: 'crime', limit: 50 })}`);
-for (const r of wa.results || []) out(`  ${r.resource.id} | ${r.resource.name} | ${r.resource.type} | updated ${r.resource.data_updated_at}`);
+sec('data.wa.gov vvfu-ry7f (WASPC NIBRS by agency)');
+await soc('vvfu-ry7f', 'https://data.wa.gov', 'vvfu-ry7f', 'indexyear');
+const yrs = await tryJSON(`https://data.wa.gov/resource/vvfu-ry7f.json?${qs({ $select: 'indexyear, count(*) as n', $group: 'indexyear', $order: 'indexyear DESC', $limit: 20 })}`);
+out(`  rows per year: ${JSON.stringify(yrs).slice(0, 600)}`);
+const locs = await tryJSON(`https://data.wa.gov/resource/vvfu-ry7f.json?${qs({ $select: 'location,county,population,total', $where: "indexyear='2024'", $limit: 400, $order: 'location' })}`);
+if (Array.isArray(locs)) out(`  2024 agencies (${locs.length}): ${locs.map(l => `${l.location} [${l.county}] ${l.population}`).join(' | ').slice(0, 6000)}`);
+else out(`  2024 agencies: ${JSON.stringify(locs).slice(0, 300)}`);
 
-// ------------------------------------------------------------------- transit
-sec('WSDOT transit');
-const tsvc = await arcService('TransitData', 'https://data.wsdot.wa.gov/arcgis/rest/services/Shared/TransitData/FeatureServer');
-if (tsvc) for (const l of tsvc.layers || []) await arcLayer(`  layer ${l.id} ${l.name}`, `https://data.wsdot.wa.gov/arcgis/rest/services/Shared/TransitData/FeatureServer/${l.id}`, '1=1');
+sec('Census place gazetteer');
+for (const y of [2025, 2024, 2023]) {
+  try {
+    const html = await fetchText(`https://www2.census.gov/geo/docs/maps-data/data/gazetteer/${y}_Gazetteer/`, {}, { retries: 0, timeoutMs: 30000 });
+    const files = [...html.matchAll(/href="([^"]+)"/g)].map(m => m[1]).filter(f => /place|county|cousub/i.test(f));
+    out(`${y}: ${files.join(' ')}`);
+  } catch (e) { out(`${y}: ${e.message}`); }
+}
+
+sec('FBI CDE keyless backend');
+for (const u of ['https://cde.ucr.cjis.gov/LATEST/agency/byStateAbbr/WA',
+  'https://cde.ucr.cjis.gov/LATEST/summarized/agency/WA0320400/violent-crime?from=01-2025&to=12-2025',
+  'https://cde.ucr.cjis.gov/LATEST/s3/signedurl?key=nibrs/incident/2024/WA-2024.zip']) {
+  try { const r = await fetchRetry(u, {}, { retries: 0, timeoutMs: 40000 }); out(`${u} -> ${r.status} ${(await r.text()).slice(0, 400)}`); }
+  catch (e) { out(`${u} -> ${e.message}`); }
+}
+
+sec('Seattle');
+const sea = await tryJSON(`https://data.seattle.gov/resource/tazs-3rd5.json?${qs({ $select: "count(*) as n, sum(case(latitude='REDACTED',1,true,0)) as redacted", $where: "offense_date >= '2025-09-29T00:00:00'" })}`);
+out(`  last 12 months: ${JSON.stringify(sea)}`);
+
+sec('Tacoma TPD_RMS_Crime');
+await arcLayer('TPD_RMS_Crime/0', 'https://services3.arcgis.com/SCwJH1pD8WSn5T5y/arcgis/rest/services/TPD_RMS_Crime/FeatureServer/0',
+  "DateOccurred >= TIMESTAMP '2025-09-29 00:00:00'", 'DateOccurred DESC');
+
+sec('King County Sheriff 4kmt-kfqf');
+await soc('KCSO', 'https://data.kingcounty.gov', '4kmt-kfqf', 'incident_datetime');
+
+sec('Everett szww-y224');
+await soc('Everett cases', 'https://data.everettwa.gov', 'szww-y224', 'datetimereceived', "datetimereceived < '2026-10-01T00:00:00'");
+
+sec('Auburn 8g4u-7zzy');
+await soc('Auburn', 'https://data.auburnwa.gov', '8g4u-7zzy', 'reported');
+const aub = await tryJSON(`https://data.auburnwa.gov/resource/8g4u-7zzy.json?${qs({ $select: 'offense, count(*) as n', $group: 'offense', $order: 'n DESC', $limit: 60, $where: "reported >= '2025-09-29T00:00:00'" })}`);
+out(`  offenses: ${JSON.stringify(aub).slice(0, 2500)}`);
+
+sec('Pierce County Sheriff');
+const pc = await arcService('Crime_Data', 'https://services2.arcgis.com/1UvBaQ5y1ubjUPmd/arcgis/rest/services/Crime_Data/FeatureServer');
+if (pc) for (const l of (pc.layers || []).slice(0, 8)) await arcLayer(`  layer ${l.id} ${l.name}`, `https://services2.arcgis.com/1UvBaQ5y1ubjUPmd/arcgis/rest/services/Crime_Data/FeatureServer/${l.id}`);
+await soc('Pierce socrata', 'https://internal.open.piercecountywa.gov', '9ik3-ebpg', 'occurredon');
+
+sec('Yakima');
+await arcLayer('Crimes_public/0', 'https://services5.arcgis.com/drBwGNA3YMS2QPJd/arcgis/rest/services/Crimes_public_fc349e427d9945729c4e985666b31686/FeatureServer/0',
+  "reportdate >= TIMESTAMP '2025-09-29 00:00:00'", 'reportdate DESC', 'offenseid,reportdate,nibrsdesc,neighborhood,zip5');
+
+sec('Bellevue');
+for (const svc of ['Offenses', 'Crime_Cases_By_100_Block']) {
+  const s = await arcService(svc, `https://services1.arcgis.com/EYzEZbDhXZjURPbP/arcgis/rest/services/${svc}/FeatureServer`);
+  if (s) for (const l of (s.layers || []).slice(0, 3)) {
+    const info = await tryJSON(`https://services1.arcgis.com/EYzEZbDhXZjURPbP/arcgis/rest/services/${svc}/FeatureServer/${l.id}?f=json`);
+    const dateF = (info.fields || []).filter(f => /Date/.test(f.type)).map(f => f.name);
+    out(`  layer ${l.id}: fields ${fieldNames(info)}`);
+    for (const d of dateF.slice(0, 2)) {
+      const st = await tryJSON(`https://services1.arcgis.com/EYzEZbDhXZjURPbP/arcgis/rest/services/${svc}/FeatureServer/${l.id}/query?${qs({ where: '1=1', outStatistics: JSON.stringify([{ statisticType: 'max', onStatisticField: d, outStatisticFieldName: 'mx' }, { statisticType: 'count', onStatisticField: d, outStatisticFieldName: 'n' }]), f: 'json' })}`);
+      const a = st.features && st.features[0] && st.features[0].attributes;
+      out(`    ${d}: max=${a && a.mx && new Date(a.mx).toISOString()} n=${a && a.n} ${st.__err || (st.error && st.error.message) || ''}`);
+    }
+  }
+}
+
+sec('Redmond / Kirkland');
+await arcService('Redmond Crimes', 'https://gis.redmond.gov/arcgis/rest/services/CrimeMap/Crimes/FeatureServer');
+await arcLayer('Redmond Crimes/0', 'https://gis.redmond.gov/arcgis/rest/services/CrimeMap/Crimes/FeatureServer/0', undefined, undefined, 'LawIncidentNumber,DateTimeReported,OffenseCode,WebSubType');
+await arcService('Kirkland CrimeAnalysis (Public)', 'https://maps.kirklandwa.gov/host/rest/services/Hosted/CrimeAnalysis_(Public)/FeatureServer');
+await arcLayer('Kirkland/0', 'https://maps.kirklandwa.gov/host/rest/services/Hosted/CrimeAnalysis_(Public)/FeatureServer/0');
+
+sec('Spokane CrimePoints (suspected D.C.)');
+await arcService('CrimePoints', 'https://services6.arcgis.com/ydggmMcp46DZ7B9Z/ArcGIS/rest/services/CrimePoints/FeatureServer');
+
+// ------------------------------------------------------------------ amenities
+sec('WA DOH pharmacies');
+const ph = await tryJSON(`https://www.arcgis.com/sharing/rest/search?${qs({ q: 'pharmacies orgid:rGGrs6HCnw87OFOT', num: 20, f: 'json' })}`);
+for (const r of ph.results || []) out(`  ${r.id} | ${r.title} | ${r.type} | ${r.owner} | ${r.url} | mod ${new Date(r.modified).toISOString().slice(0, 10)}`);
+const ph2 = await tryJSON(`https://www.arcgis.com/sharing/rest/search?${qs({ q: 'title:Pharmacies owner:WADOH', num: 20, f: 'json' })}`);
+for (const r of ph2.results || []) out(`  (owner search) ${r.id} | ${r.title} | ${r.type} | ${r.owner} | ${r.url}`);
+const dohRoot = await tryJSON('https://services8.arcgis.com/rGGrs6HCnw87OFOT/arcgis/rest/services?f=json');
+out(`  DOH services (${(dohRoot.services || []).length}): ${(dohRoot.services || []).map(s => s.name).join(', ').slice(0, 4000)}`);
+await arcLayer('DOH Clinics', 'https://services8.arcgis.com/rGGrs6HCnw87OFOT/arcgis/rest/services/Clinics/FeatureServer/0');
+
+sec('NCUA call report ZIP');
+for (const q of ['2026-06', '2026-03', '2025-12']) {
+  const u = `https://ncua.gov/files/publications/analysis/call-report-data-${q}.zip`;
+  try { const r = await fetchRetry(u, { method: 'HEAD' }, { retries: 0, timeoutMs: 30000 }); out(`${u} -> ${r.status} len=${r.headers.get('content-length')}`); }
+  catch (e) { out(`${u} -> ${e.message}`); }
+}
+
+sec('PAD-US');
+await arcLayer('Manager_Type_PADUS', 'https://services.arcgis.com/v01gqwM5QqNysAAi/arcgis/rest/services/Manager_Type_PADUS/FeatureServer/0', "State_Nm='WA'");
+await arcLayer('WA State Parks', 'https://services5.arcgis.com/4LKAHwqnBooVDUlX/arcgis/rest/services/ParkBoundaries/FeatureServer/2');
+
+sec('Mobility Database catalog');
 try {
-  const html = await fetchText('https://data.wsdot.wa.gov/gtfs/list.html', {}, { retries: 1 });
-  const zips = [...html.matchAll(/href="([^"]+)"/gi)].map(m => m[1]);
-  out(`gtfs list: ${zips.length} links; zips=${zips.filter(z => /\.zip/i.test(z)).length}; first: ${zips.slice(0, 15).join(' ')}`);
-} catch (e) { out(`gtfs list: ${e.message}`); }
+  const csv = await fetchText('https://files.mobilitydatabase.org/feeds_v2.csv', {}, { retries: 1, timeoutMs: 60000 });
+  const lines = csv.split('\n');
+  out(`header: ${lines[0]}`);
+  out(`WA rows: ${lines.filter(l => /,Washington,/.test(l)).length}; sample: ${lines.filter(l => /,Washington,/.test(l)).slice(0, 3).join(' || ').slice(0, 1500)}`);
+} catch (e) { out(`catalog: ${e.message}`); }
+
 out('\nDONE');
