@@ -1,8 +1,8 @@
 name: Check data sources
 
-# Probes every live data source the map calls from the browser, with a browser
-# Origin header, and writes a status table to the run summary. Report-only: an
-# outage upstream is visible here but never fails the build.
+# Probes every data source the map uses (browser-side feeds with an Origin
+# header, then the build-time registries) and writes a status table to the run
+# summary. Report-only: an outage upstream is visible here but never fails CI.
 on:
   push:
     paths:

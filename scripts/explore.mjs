@@ -1,80 +1,57 @@
-// Temporary exploration probe (removed before merge). Round 3.
-import { execFileSync } from 'node:child_process';
-import { writeFile, mkdtemp } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
-import { fetchRetry, fetchJSON, qs } from './build-data/lib.mjs';
+// Temporary exploration probe (removed before merge). Round 4: replay the
+// exact queries the browser's crime adapters send, with a browser Origin, and
+// check status, CORS and the shape of the answer.
+const ORIGIN = 'https://justin-tran1.github.io';
+const qs = p => Object.entries(p).map(([k, v]) => encodeURIComponent(k) + '=' + encodeURIComponent(v)).join('&');
+const since = new Date(Date.now() - 90 * 86400000).toISOString().slice(0, 10);
 
-const out = (...a) => console.log(...a);
-const sec = s => out(`\n=================== ${s}`);
-const tryJSON = async url => { try { return await fetchJSON(url, {}, { retries: 1, timeoutMs: 60000 }); } catch (e) { return { __err: e.message }; } };
-const fieldNames = info => (info.fields || []).map(f => `${f.name}:${(f.type || '').replace('esriFieldType', '')}`).join(',');
-
-sec('HELMS facilities');
-const helms = 'https://services8.arcgis.com/rGGrs6HCnw87OFOT/arcgis/rest/services/Facility_HELMS_Report_DEC2025/FeatureServer';
-const hs = await tryJSON(`${helms}?f=json`);
-out(`layers: ${(hs.layers || []).map(l => `${l.id}:${l.name}`).join(' | ')} ${hs.__err || ''}`);
-for (const l of (hs.layers || []).slice(0, 4)) {
-  const info = await tryJSON(`${helms}/${l.id}?f=json`);
-  out(`layer ${l.id}: type=${info.geometryType} fields ${fieldNames(info)}`);
-  const strF = (info.fields || []).filter(f => /String/.test(f.type) && /type|categ|class|program|profession|credential|status/i.test(f.name)).map(f => f.name);
-  for (const f of strF.slice(0, 4)) {
-    const d = await tryJSON(`${helms}/${l.id}/query?${qs({ where: '1=1', groupByFieldsForStatistics: f, outStatistics: JSON.stringify([{ statisticType: 'count', onStatisticField: 'OBJECTID', outStatisticFieldName: 'n' }]), f: 'json' })}`);
-    out(`  ${f}: ${(d.features || []).map(x => `${x.attributes[f]}=${x.attributes.n}`).join(' | ').slice(0, 3000)} ${d.__err || (d.error && JSON.stringify(d.error)) || ''}`);
-  }
-  const s = await tryJSON(`${helms}/${l.id}/query?${qs({ where: '1=1', outFields: '*', resultRecordCount: 2, outSR: 4326, f: 'json' })}`);
-  (s.features || []).forEach(f => out(`  sample: ${JSON.stringify(f).slice(0, 900)}`));
+async function probe(label, url, check) {
+  try {
+    const res = await fetch(url, { headers: { Origin: ORIGIN, 'User-Agent': 'Mozilla/5.0 probe' } });
+    const text = await res.text();
+    let body; try { body = JSON.parse(text); } catch (e) { body = null; }
+    const acao = res.headers.get('access-control-allow-origin');
+    let verdict = '';
+    try { verdict = check(body, text); } catch (e) { verdict = 'check error ' + e.message; }
+    console.log(`${label}: HTTP ${res.status} ACAO=${acao || 'MISSING'} | ${verdict}`);
+  } catch (e) { console.log(`${label}: FETCH FAILED ${e.message}`); }
 }
+const feats = b => (b && (b.features || [])) || [];
+const first = b => JSON.stringify(feats(b)[0] || b).slice(0, 300);
 
-sec('NCUA call report 2026-06');
-try {
-  const res = await fetchRetry('https://ncua.gov/files/publications/analysis/call-report-data-2026-06.zip', {}, { retries: 1, timeoutMs: 300000 });
-  const buf = Buffer.from(await res.arrayBuffer());
-  const dir = await mkdtemp(`${tmpdir()}/ncua-`);
-  await writeFile(`${dir}/c.zip`, buf);
-  out(`zip bytes: ${buf.length}`);
-  out(execFileSync('unzip', ['-l', `${dir}/c.zip`]).toString().slice(0, 3000));
-  const txt = execFileSync('bash', ['-c', `unzip -p "${dir}/c.zip" '*ranch*' | head -3`]).toString();
-  out(`branch file head:\n${txt.slice(0, 3000)}`);
-  const wa = execFileSync('bash', ['-c', `unzip -p "${dir}/c.zip" '*ranch*' | grep -c ',"WA",\\|,WA,' || true`]).toString();
-  out(`WA-ish lines: ${wa}`);
-} catch (e) { out(`ncua: ${e.message}`); }
+// Seattle (socrata, live schema)
+await probe('seattle', `https://data.seattle.gov/resource/tazs-3rd5.json?${qs({ $select: 'offense_date,nibrs_offense_code_description,offense_category,latitude,longitude,block_address,neighborhood', $where: `offense_date >= '${since}'`, $order: 'offense_date DESC', $limit: 5000, $offset: 0 })}`,
+  b => `${Array.isArray(b) ? b.length : 'not array'} rows; ${JSON.stringify((b || [])[0]).slice(0, 200)}`);
+// Everett (socrata, keyword column quoted)
+await probe('everett quoted', `https://data.everettwa.gov/resource/szww-y224.json?${qs({ $select: 'datetimereceived,`case`,geomcoordinate,occurredlocationby100block,neighborhood', $where: `datetimereceived >= '${since}'`, $order: 'datetimereceived DESC', $limit: 5000, $offset: 0 })}`,
+  b => `${Array.isArray(b) ? b.length : JSON.stringify(b).slice(0, 200)} rows; ${JSON.stringify((Array.isArray(b) && b[0]) || '').slice(0, 250)}`);
+await probe('everett unquoted', `https://data.everettwa.gov/resource/szww-y224.json?${qs({ $select: 'datetimereceived,case,geomcoordinate', $where: `datetimereceived >= '${since}'`, $limit: 2 })}`,
+  b => `${Array.isArray(b) ? b.length + ' rows' : JSON.stringify(b).slice(0, 200)}`);
 
-sec('Kirkland offenses');
-const kk = 'https://maps.kirklandwa.gov/host/rest/services/Hosted/CrimeAnalysis_(Public)/FeatureServer';
-for (const id of [2, 3, 1]) {
-  const info = await tryJSON(`${kk}/${id}?f=json`);
-  out(`layer ${id} ${info.name}: type=${info.geometryType} max=${info.maxRecordCount} fields ${fieldNames(info)}`);
-  const dateF = (info.fields || []).filter(f => /Date/.test(f.type)).map(f => f.name);
-  for (const d of dateF.slice(0, 3)) {
-    const st = await tryJSON(`${kk}/${id}/query?${qs({ where: '1=1', outStatistics: JSON.stringify([{ statisticType: 'max', onStatisticField: d, outStatisticFieldName: 'mx' }, { statisticType: 'count', onStatisticField: d, outStatisticFieldName: 'n' }]), f: 'json' })}`);
-    const a = st.features && st.features[0] && st.features[0].attributes;
-    out(`  ${d}: max=${a && a.mx && new Date(a.mx).toISOString()} n=${a && a.n}`);
-  }
-  const s = await tryJSON(`${kk}/${id}/query?${qs({ where: '1=1', outFields: '*', resultRecordCount: 1, outSR: 4326, f: 'json' })}`);
-  (s.features || []).forEach(f => out(`  sample: ${JSON.stringify(f).slice(0, 1200)}`));
-}
-
-sec('Bellevue Crimes sample');
-const bs = await tryJSON(`https://services1.arcgis.com/EYzEZbDhXZjURPbP/arcgis/rest/services/Offenses/FeatureServer/1/query?${qs({ where: "FROM_DATE >= TIMESTAMP '2025-09-29 00:00:00'", outFields: '*', resultRecordCount: 3, outSR: 4326, f: 'json', orderByFields: 'FROM_DATE DESC' })}`);
-(bs.features || []).forEach(f => out(`  sample: ${JSON.stringify(f).slice(0, 700)}`));
-const bc = await tryJSON(`https://services1.arcgis.com/EYzEZbDhXZjURPbP/arcgis/rest/services/Offenses/FeatureServer/1/query?${qs({ where: "FROM_DATE >= TIMESTAMP '2025-09-29 00:00:00'", returnCountOnly: true, f: 'json' })}`);
-out(`  last 12 months: ${JSON.stringify(bc)}`);
-
-sec('Redmond sample + range');
-const rd = 'https://gis.redmond.gov/arcgis/rest/services/CrimeMap/Crimes/FeatureServer/0';
-const rst = await tryJSON(`${rd}/query?${qs({ where: '1=1', outStatistics: JSON.stringify([{ statisticType: 'min', onStatisticField: 'DateTimeReported', outStatisticFieldName: 'mn' }, { statisticType: 'max', onStatisticField: 'DateTimeReported', outStatisticFieldName: 'mx' }]), f: 'json' })}`);
-const ra = rst.features && rst.features[0] && rst.features[0].attributes;
-out(`  range: ${ra && new Date(ra.mn).toISOString()} .. ${ra && new Date(ra.mx).toISOString()} ${rst.__err || ''}`);
-const rs = await tryJSON(`${rd}/query?${qs({ where: '1=1', outFields: 'LawIncidentNumber,DateTimeReported,OffenseDescription,IBR_Description,UCR_Description,FilteredAddress,WebSubType', resultRecordCount: 3, outSR: 4326, f: 'json' })}`);
-(rs.features || []).forEach(f => out(`  sample: ${JSON.stringify(f).slice(0, 600)}`));
-
-sec('PAD-US centroid support');
-const pad = 'https://services.arcgis.com/v01gqwM5QqNysAAi/arcgis/rest/services/Manager_Type_PADUS/FeatureServer/0';
-const pc = await tryJSON(`${pad}/query?${qs({ where: "State_Nm='WA' AND FeatClass='Fee' AND Des_Tp IN ('LP','LREC','SP','SREC','NP','NRA')", returnCountOnly: true, f: 'json' })}`);
-out(`  count: ${JSON.stringify(pc)}`);
-const pcs = await tryJSON(`${pad}/query?${qs({ where: "State_Nm='WA' AND FeatClass='Fee' AND Des_Tp='LP'", outFields: 'Unit_Nm,Loc_Nm,Mang_Name,Loc_Mang,Des_Tp,GIS_Acres,Pub_Access', returnGeometry: false, returnCentroid: true, outSR: 4326, resultRecordCount: 3, f: 'json' })}`);
-out(`  centroid sample: ${JSON.stringify(pcs).slice(0, 1200)}`);
-const dt = await tryJSON(`${pad}/query?${qs({ where: "State_Nm='WA'", groupByFieldsForStatistics: 'Des_Tp,FeatClass', outStatistics: JSON.stringify([{ statisticType: 'count', onStatisticField: 'OBJECTID', outStatisticFieldName: 'n' }]), f: 'json' })}`);
-out(`  Des_Tp x FeatClass: ${(dt.features || []).map(x => `${x.attributes.Des_Tp}/${x.attributes.FeatClass}=${x.attributes.n}`).join(' ')}`);
-
-out('\nDONE');
+const arc = (label, url, fields) => {
+  const outFields = [fields.date, ...fields.offense, fields.addr, fields.lat, fields.lon].filter(Boolean).join(',');
+  const base = { outFields, geometryPrecision: 6, orderByFields: `${fields.date} DESC`, returnGeometry: true, outSR: 4326, resultRecordCount: 1000, resultOffset: 0 };
+  return Promise.all([
+    probe(label + ' geojson/TIMESTAMP', `${url}/query?${qs({ ...base, where: `${fields.date} >= TIMESTAMP '${since} 00:00:00'`, f: 'geojson' })}`,
+      b => `${b && b.error ? 'ERROR ' + JSON.stringify(b.error).slice(0, 200) : feats(b).length + ' features; ' + first(b)}`),
+    probe(label + ' json/DATE', `${url}/query?${qs({ ...base, where: `${fields.date} >= DATE '${since}'`, f: 'json' })}`,
+      b => `${b && b.error ? 'ERROR ' + JSON.stringify(b.error).slice(0, 200) : feats(b).length + ' features; exceeded=' + (b && b.exceededTransferLimit)}`),
+    probe(label + ' layer info', `${url}?f=json`, b => `type=${b && b.type} max=${b && b.maxRecordCount} ${b && b.error ? JSON.stringify(b.error) : ''}`)
+  ]);
+};
+await arc('tacoma', 'https://services3.arcgis.com/SCwJH1pD8WSn5T5y/arcgis/rest/services/TPD_RMS_Crime/FeatureServer/0',
+  { date: 'DateOccurred', offense: ['Description', 'Offense_Category'], addr: 'Address', lat: 'Latitude', lon: 'Longitude' });
+await arc('bellevue', 'https://services1.arcgis.com/EYzEZbDhXZjURPbP/arcgis/rest/services/Offenses/FeatureServer/1',
+  { date: 'FROM_DATE', offense: ['LEGEND', 'STAT_KEYWORD'], lat: 'LATITUDE', lon: 'LONGITUDE' });
+await arc('redmond', 'https://gis.redmond.gov/arcgis/rest/services/CrimeMap/Crimes/FeatureServer/0',
+  { date: 'DateTimeReported', offense: ['OffenseDescription', 'UCR_Description', 'WebSubType'], addr: 'FilteredAddress' });
+await arc('kirkland', 'https://maps.kirklandwa.gov/host/rest/services/Hosted/CrimeAnalysis_(Public)/FeatureServer/2',
+  { date: 'from_date', offense: ['nibrs_desc', 'cm_nibrs_desc'], addr: 'block_address' });
+await arc('pierce', 'https://services2.arcgis.com/1UvBaQ5y1ubjUPmd/arcgis/rest/services/Crime_Data/FeatureServer/1',
+  { date: 'OccurredOn', offense: ['Public_Nam'], addr: 'City' });
+await arc('yakima', 'https://services5.arcgis.com/drBwGNA3YMS2QPJd/arcgis/rest/services/Crimes_public_fc349e427d9945729c4e985666b31686/FeatureServer/0',
+  { date: 'reportdate', offense: ['nibrsdesc'], addr: 'neighborhood' });
+// WSDOT routes as the transit layer asks
+await probe('wsdot routes', `https://data.wsdot.wa.gov/arcgis/rest/services/Shared/TransitData/FeatureServer/3/query?${qs({ where: '1=1', outFields: '*', geometryPrecision: 5, maxAllowableOffset: 0.0003, geometry: '-122.4,47.55,-122.25,47.7', geometryType: 'esriGeometryEnvelope', inSR: 4326, spatialRel: 'esriSpatialRelIntersects', returnGeometry: true, outSR: 4326, f: 'geojson', resultRecordCount: 2000, resultOffset: 0 })}`,
+  b => `${feats(b).length} routes; ${JSON.stringify((feats(b)[0] || {}).properties || b).slice(0, 300)}`);
+console.log('DONE');

@@ -306,6 +306,9 @@
       return city.schemas;
     }
 
+    // Column names that collide with SoQL keywords (Everett's offense column
+    // is literally "case") must be back-quoted in queries.
+    const soqlName = n => (/^(case|select|where|order|group|limit|offset|and|or|not|is|null|true|false|like|between|in|as|by|asc|desc|having|search)$/i.test(n) ? '`' + n + '`' : n);
     async function fetchSocrata(city) {
       const schemas = await resolveSocrataSchemas(city);
       const since = isoDay(sinceDate());
@@ -313,7 +316,7 @@
       for (const schema of schemas) {
         try {
           res = await U.socrataQuery(city.cfg.domains, city.cfg.dataset, {
-            $select: [schema.date, ...schema.offense, schema.lat, schema.lon, schema.point, schema.addr, schema.area].filter(Boolean).join(','),
+            $select: [schema.date, ...schema.offense, schema.lat, schema.lon, schema.point, schema.addr, schema.area].filter(Boolean).map(soqlName).join(','),
             $where: `${schema.date} >= '${since}'`,
             $order: `${schema.date} DESC`
           }, { maxRows: CFG.CRIME.maxPerCity });

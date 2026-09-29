@@ -1,8 +1,15 @@
 /* Integration smoke test: serves the repo locally, mocks every external API
  * with fixtures, and drives the app in headless Chromium. */
 import { chromium } from 'playwright-core';
+import { readFileSync, existsSync } from 'node:fs';
 
 const BASE = 'http://127.0.0.1:8137';
+// The app loads its data from the committed, pre-built files under data/
+// (served by the local web server); expectations are read from them too.
+const REPO = new URL('..', import.meta.url).pathname;
+const readData = f => JSON.parse(readFileSync(REPO + 'data/' + f, 'utf8'));
+const hasData = f => existsSync(REPO + 'data/' + f);
+const ACS_COUNTY = readData('acs/county.json');
 const failures = [];
 const pass = m => console.log('  ✓ ' + m);
 const fail = m => { failures.push(m); console.log('  ✗ ' + m); };
@@ -81,18 +88,31 @@ const SEATTLE_COLUMNS = ['report_number', 'report_date_time', 'offense_id', 'off
   'longitude', 'beat', 'precinct', 'sector', 'neighborhood', 'reporting_area', 'offense_category',
   'nibrs_offense_code_description', 'nibrs_offense_code'];
 let seattleSelect = null; // captured from the live query for assertions
+// Tacoma's layer is a table: coordinates are attributes, geometry is null.
 const TACOMA_POINTS = {
   type: 'FeatureCollection',
   features: [0, 1, 2].map(i => ({
     type: 'Feature',
-    properties: { OBJECTID: i, Crime: ['THEFT FROM MOTOR VEHICLE', 'ROBBERY', 'VANDALISM'][i], OccurredOn: now - (i + 2) * 86400000, Intersection: 'S ' + (10 + i) + 'TH & A ST' },
-    geometry: { type: 'Point', coordinates: [-122.44 - i * 0.004, 47.25 + i * 0.004] }
+    properties: { Description: ['Theft From Motor Vehicle', 'Robbery', 'Destruction/Damage/Vandalism of Property'][i], Offense_Category: ['Larceny/Theft Offenses', 'Robbery', 'Destruction/Damage/Vandalism of Property'][i],
+      DateOccurred: now - (i + 2) * 86400000, Address: (10 + i) + '00 S 12TH ST', Latitude: 47.25 + i * 0.004, Longitude: -122.44 - i * 0.004 },
+    geometry: null
   }))
+};
+const EVERETT_ROWS = [0, 1].map(i => ({
+  datetimereceived: new Date(now - (i + 1) * 86400000).toISOString().slice(0, 23),
+  case: ['VUCSA - MISDEMEANOR', 'BURGLARY - RESIDENTIAL'][i],
+  occurredlocationby100block: '19XX EVERETT AVE , EVERETT, WA, 98201', neighborhood: 'BAYSIDE',
+  geomcoordinate: { type: 'Point', coordinates: [-122.2 - i * 0.01, 47.98] }
+}));
+const PIERCE_POINTS = {
+  type: 'FeatureCollection',
+  features: [{ type: 'Feature', properties: { OccurredOn: now - 86400000 * 3, Public_Nam: 'Theft - Vehicle Prowl', City: 'Pierce County' },
+    geometry: { type: 'Point', coordinates: [-122.45, 47.16] } }]
 };
 const WSDOT_ROUTES = {
   type: 'FeatureCollection',
   features: [
-    { type: 'Feature', properties: { route_type: 3, route_short_name: '40', route_long_name: 'Northgate - Downtown', agency_name: 'King County Metro' },
+    { type: 'Feature', properties: { route_type: 3, route_short_name: '40', route_long_name: null, route_desc: 'Northgate - Downtown', agency_name: 'Metro Transit', route_url: 'https://kingcounty.gov/en/dept/metro/routes-and-service/schedules-and-maps/040.html' },
       geometry: { type: 'LineString', coordinates: [[-122.36, 47.6], [-122.33, 47.61], [-122.3, 47.66]] } },
     { type: 'Feature', properties: { route_type: 0, route_short_name: '1 Line', route_long_name: 'Link light rail', agency_name: 'Sound Transit' },
       geometry: { type: 'LineString', coordinates: [[-122.33, 47.59], [-122.32, 47.62]] } }
@@ -101,7 +121,7 @@ const WSDOT_ROUTES = {
 const WSDOT_STOPS = {
   type: 'FeatureCollection',
   features: [0, 1, 2, 3].map(i => ({
-    type: 'Feature', properties: { stop_name: 'Stop ' + i, agency_name: 'King County Metro' },
+    type: 'Feature', properties: { stop_name: 'Stop ' + i, stop_id: 'KCM_' + (1000 + i) },
     geometry: { type: 'Point', coordinates: [-122.34 + i * 0.01, 47.6 + i * 0.005] }
   }))
 };
@@ -185,45 +205,35 @@ function handle(url, method, postData) {
     }
     return jsonRes([]);
   }
-  // Tacoma item + service
-  if (u.hostname === 'www.arcgis.com') {
-    return jsonRes({ id: '4b9326', url: 'https://services9.example.com/tacoma/FeatureServer' });
+  // Tacoma (TPD_RMS_Crime table)
+  if (u.hostname === 'services3.arcgis.com' && u.pathname.includes('TPD_RMS_Crime')) {
+    if (full.includes('/0?f=json')) return jsonRes({ type: 'Table', maxRecordCount: 1000, fields: [] });
+    if (full.includes('/0/query')) {
+      const out = new URL(full).searchParams.get('outFields') || '';
+      if (/\*|officer/i.test(out)) return jsonRes({ error: { code: 400, message: 'test: only configured fields may be requested' } });
+      return jsonRes(TACOMA_POINTS);
+    }
   }
-  if (u.hostname === 'services9.example.com') {
-    if (full.endsWith('FeatureServer?f=json')) return jsonRes({ layers: [{ id: 0, name: 'Reported Crime' }] });
-    if (full.includes('/0?f=json')) return jsonRes({
-      type: 'Feature Layer', maxRecordCount: 2000,
-      fields: [
-        { name: 'OBJECTID', type: 'esriFieldTypeOID' },
-        { name: 'Crime', type: 'esriFieldTypeString' },
-        { name: 'OccurredOn', type: 'esriFieldTypeDate' },
-        { name: 'Intersection', type: 'esriFieldTypeString' }]
-    });
-    if (full.includes('/0/query')) return jsonRes(TACOMA_POINTS);
+  // Pierce County Sheriff
+  if (u.hostname === 'services2.arcgis.com' && u.pathname.includes('Crime_Data')) {
+    if (full.includes('/1?f=json')) return jsonRes({ type: 'Feature Layer', maxRecordCount: 2000, fields: [] });
+    if (full.includes('/1/query')) return jsonRes(PIERCE_POINTS);
   }
-  // Spokane
-  if (u.hostname === 'services6.arcgis.com') {
-    if (full.includes('FeatureServer?f=json')) return jsonRes({ layers: [{ id: 3, name: '2025 Smith' }, { id: 1, name: '2014 Lanier' }] });
-    if (full.includes('/3?f=json')) return jsonRes({
-      type: 'Feature Layer', maxRecordCount: 2000,
-      fields: [{ name: 'offense_type', type: 'esriFieldTypeString' }, { name: 'occurred_date', type: 'esriFieldTypeDate' }]
-    });
-    if (full.includes('/1?f=json')) return jsonRes({ error: { code: 500, message: 'layer offline' } });
-    if (full.includes('/3/query')) return jsonRes({
-      type: 'FeatureCollection',
-      features: [{ type: 'Feature', properties: { offense_type: 'BURGLARY RESIDENTIAL', occurred_date: now - 86400000 * 3 }, geometry: { type: 'Point', coordinates: [-117.42, 47.66] } }]
-    });
+  // Everett (Socrata, point column)
+  if (u.hostname === 'data.everettwa.gov' && u.pathname.includes('szww-y224')) {
+    return jsonRes(u.searchParams.get('$offset') === '0' ? EVERETT_ROWS : []);
   }
   // WSDOT
   if (u.hostname === 'data.wsdot.wa.gov') {
     if (full.includes('TransitData/FeatureServer?f=json')) return jsonRes({ layers: [{ id: 1, name: 'Transit Stops' }, { id: 3, name: 'Transit Routes' }] });
     if (full.includes('TransitData/FeatureServer/3?f=json')) return jsonRes({
       type: 'Feature Layer', maxRecordCount: 2000,
-      fields: [{ name: 'route_type', type: 'esriFieldTypeInteger' }, { name: 'route_short_name', type: 'esriFieldTypeString' }, { name: 'route_long_name', type: 'esriFieldTypeString' }, { name: 'agency_name', type: 'esriFieldTypeString' }]
+      fields: ['route_short_name', 'agency_id', 'route_id', 'route_long_name', 'route_desc', 'route_type', 'route_url', 'agency_name']
+        .map(name => ({ name, type: name === 'route_type' ? 'esriFieldTypeString' : 'esriFieldTypeString' }))
     });
     if (full.includes('TransitData/FeatureServer/1?f=json')) return jsonRes({
       type: 'Feature Layer', maxRecordCount: 2000,
-      fields: [{ name: 'stop_name', type: 'esriFieldTypeString' }, { name: 'agency_name', type: 'esriFieldTypeString' }]
+      fields: [{ name: 'stop_id', type: 'esriFieldTypeString' }, { name: 'stop_name', type: 'esriFieldTypeString' }]
     });
     if (full.includes('FeatureServer/3/query')) return jsonRes(WSDOT_ROUTES);
     if (full.includes('FeatureServer/1/query')) return jsonRes(WSDOT_STOPS);
@@ -252,8 +262,9 @@ function handle(url, method, postData) {
     if (u.pathname === '/search') return jsonRes([{ display_name: 'Space Needle, 400, Broad Street, Seattle, WA', lat: '47.6205', lon: '-122.3493' }]);
     return jsonRes({ display_name: '400 Broad St, Seattle, WA 98109' });
   }
-  if (u.hostname === 'geocoding.geo.census.gov') {
-    return jsonRes({ result: { addressMatches: [{ matchedAddress: '400 BROAD ST, SEATTLE, WA, 98109', coordinates: { x: -122.3493, y: 47.6205 } }] } });
+  if (u.hostname === 'geocode.arcgis.com') {
+    return jsonRes({ candidates: [{ address: '400 Broad St, Seattle, Washington, 98109', location: { x: -122.3493, y: 47.6205 }, score: 100,
+      attributes: { Match_addr: '400 Broad St, Seattle, Washington, 98109', Addr_type: 'PointAddress', Region: 'Washington' } }] });
   }
   // Map tiles: serve a 1x1 transparent PNG so Leaflet really builds tile
   // elements (the label-pane assertions depend on that).
@@ -309,8 +320,8 @@ console.log('· demographics (county level)');
 await setToggle('card-demographics', true);
 await page.waitForTimeout(1500);
 let status = await page.locator('#card-demographics .status-line').textContent();
-assert(/ACS 5-Year 2019-2023/.test(status), 'ACS vintage fell back to 2023: "' + status.trim() + '"');
-assert(/8 counties/.test(status), 'county polygons loaded: "' + status.trim() + '"');
+assert(status.includes('ACS 5-Year ' + ACS_COUNTY.span), 'demographics read the pre-built ACS ' + ACS_COUNTY.span + ': "' + status.trim() + '"');
+assert(/\b(8|39) counties/.test(status) && !/Could not load/.test(status), 'county polygons loaded: "' + status.trim() + '"');
 assert(await page.locator('.legend-block[data-layer="demographics"]').isVisible(), 'demographics legend visible');
 const legendTitle = await page.locator('.legend-block[data-layer="demographics"] .legend-title').textContent();
 assert(/Population density/.test(legendTitle), 'legend shows default metric');
@@ -332,33 +343,96 @@ assert(/Uninsured rate/.test(await page.locator('.legend-block[data-layer="insur
 
 console.log('· amenities');
 await setToggle('card-amenities', true);
-await page.waitForTimeout(1800);
+await page.waitForFunction(() => /places statewide|Could not load/.test(document.querySelector('#card-amenities .status-line').textContent), null, { timeout: 20000 }).catch(() => {});
 status = await page.locator('#card-amenities .status-line').textContent();
-assert(/places loaded/.test(status), 'amenities loaded: "' + status.trim() + '"');
-const schoolCount = await page.locator('#amen-count-schools').textContent();
-assert(/\d/.test(schoolCount), 'NCES schools counted: "' + schoolCount + '"');
+assert(/places statewide/.test(status), 'amenities loaded statewide: "' + status.trim() + '"');
+const schoolCount = (await page.locator('#amen-count-schools').textContent()).replace(/\D/g, '');
+assert(+schoolCount === readData('amenities/schools.json').rows.length, `every school in the file is on the map (${schoolCount})`);
+const health = readData('amenities/health.json');
+const hospitalKinds = new Set(health.kinds.map((k, i) => (/hospital|emergency/i.test(k) ? i : -1)).filter(i => i >= 0));
+const hospitals = health.rows.filter(r => hospitalKinds.has(r[3])).length;
+assert(hospitals >= 100, `health file carries at least 100 hospitals (${hospitals})`);
+const bigChips = await page.locator('.poi-chip-lg').count();
+assert(bigChips === hospitals, `every hospital is drawn unclustered at statewide zoom (${bigChips}/${hospitals})`);
+assert(/hospitals always shown/.test(status), 'status line reports the always-shown hospitals');
+const srcTitle = await page.locator('#amen-label-health').getAttribute('title');
+assert(/Department of Health/.test(srcTitle || '') && /OpenStreetMap/.test(srcTitle || ''), 'health category lists its sources on hover');
+// every category file is present and well formed
+for (const c of await page.evaluate(() => WAMAP.CONFIG.AMENITIES.map(a => a.id))) {
+  const d = hasData('amenities/' + c + '.json') ? readData('amenities/' + c + '.json') : null;
+  assert(d && d.rows.length > 50 && d.kinds.length && d.sources.length, `amenities/${c}.json has ${d ? d.rows.length : 0} places from ${d ? d.sources.map(x => x.id).join('+') : '-'}`);
+}
+// a pharmacy popup renders from the compact row format (zoomed past the
+// clustering threshold onto a known pharmacy from the file)
+const ph = readData('amenities/pharmacy.json').rows[0];
+await page.evaluate(() => { document.getElementById('amen-pharmacy').click(); });
+await page.waitForTimeout(1200);
+await page.evaluate(([lat, lon]) => WAMAP.map.setView([lat, lon], 18, { animate: false }), [ph[0], ph[1]]);
+await page.waitForTimeout(1200);
+const phPopup = await page.evaluate(([lat, lon]) => {
+  let html = null;
+  WAMAP.map.eachLayer(l => {
+    if (!html && l.getLatLng && l.getPopup && l.getPopup() && Math.abs(l.getLatLng().lat - lat) < 1e-6 && Math.abs(l.getLatLng().lng - lon) < 1e-6) {
+      l.openPopup(); html = document.querySelector('.leaflet-popup-content').textContent;
+    }
+  });
+  return html;
+}, [ph[0], ph[1]]);
+assert(phPopup && phPopup.includes(ph[2]) && /Source:/.test(phPopup), 'pharmacy popup renders: ' + (phPopup || '').replace(/\s+/g, ' ').slice(0, 140));
+await page.evaluate(() => { WAMAP.map.closePopup(); document.getElementById('amen-pharmacy').click(); WAMAP.map.setView([47.6, -122.4], 11, { animate: false }); });
+await page.waitForTimeout(800);
 
 console.log('· transit');
 await setToggle('card-transit', true);
 await page.waitForTimeout(1500);
 status = await page.locator('#card-transit .status-line').textContent();
 assert(/WSDOT/.test(status), 'transit uses WSDOT source: "' + status.trim() + '"');
+const routePopup = await page.evaluate(() => {
+  let html = null;
+  WAMAP.map.eachLayer(l => { if (!html && l.feature && l.feature.properties && l.feature.properties.route_short_name === '40') { l.openPopup(); html = document.querySelector('.leaflet-popup-content').innerHTML; } });
+  return html || '';
+});
+const agencySite = (readData('transit/agencies.json').agencies['metro transit'] || {}).url;
+assert(/Northgate - Downtown/.test(routePopup), 'route popup falls back to route_desc when the long name is empty');
+assert(agencySite && routePopup.includes('href="' + agencySite + '"') && /Agency website/.test(routePopup), 'route popup links the agency website (' + agencySite + ')');
+assert(/040\.html/.test(routePopup) && /Route schedule/.test(routePopup), 'route popup links the GTFS route_url schedule page');
+await page.evaluate(() => WAMAP.map.closePopup());
 
 console.log('· crime');
 await setToggle('card-crime', true);
-await page.waitForTimeout(2000);
-const chipSeattle = await page.locator('#crime-city-seattle .chip-count').textContent();
-assert(chipSeattle.trim() === '8', 'Seattle chip count = 8, got "' + chipSeattle + '"');
+await page.waitForTimeout(2500);
+const chip = async id => (await page.locator('#crime-city-' + id + ' .chip-count').textContent()).trim();
+assert(await chip('seattle') === '8', 'Seattle chip count = 8, got "' + await chip('seattle') + '"');
 assert(seattleSelect && seattleSelect.includes('nibrs_offense_code_description') && !seattleSelect.includes('offense_start_datetime'),
   'Seattle adapter resolved the live column schema: ' + seattleSelect);
-const chipTacoma = await page.locator('#crime-city-tacoma .chip-count').textContent();
-assert(chipTacoma.trim() === '3', 'Tacoma chip count = 3 (item->service resolution), got "' + chipTacoma + '"');
-const chipSpokane = await page.locator('#crime-city-spokane .chip-count').textContent();
-assert(chipSpokane.trim() === '1', 'Spokane chip count = 1 (era layers), got "' + chipSpokane + '"');
+assert(await chip('tacoma') === '3', 'Tacoma chip count = 3 (table layer with coordinate columns, configured fields only), got "' + await chip('tacoma') + '"');
+assert(await chip('everett') === '2', 'Everett chip count = 2 (Socrata point column), got "' + await chip('everett') + '"');
+assert(await chip('pierce') === '1', 'Pierce County Sheriff chip count = 1, got "' + await chip('pierce') + '"');
+assert(await page.locator('#crime-city-spokane').count() === 0, 'mislabelled "Spokane" (Washington, D.C.) feed removed');
+for (const id of ['kcso', 'auburn']) {
+  if (!hasData('crime/' + id + '.json')) { fail(`data/crime/${id}.json missing`); continue; }
+  assert(/^\d[\d,]*$/.test(await chip(id)) && +(await chip(id)).replace(/,/g, '') > 0, `${id} pre-geocoded incidents load (${await chip(id)})`);
+}
+const agencies = readData('crime/agencies.json');
+assert(agencies.rows.length > 200, `statewide file covers ${agencies.rows.length} agencies (${agencies.year})`);
+const agencyCount = (await page.locator('#crime-agency-count').textContent()).replace(/\D/g, '');
+assert(+agencyCount === agencies.rows.length, 'every agency is drawn: ' + agencyCount);
+assert(/Crime rate by agency/.test(await page.locator('.legend-block[data-layer="crime"]').textContent()), 'crime rate legend visible');
+const agencyPopup = await page.evaluate(() => {
+  let html = null;
+  WAMAP.map.eachLayer(l => { if (!html && l instanceof L.CircleMarker && l.getPopup()) { l.openPopup(); html = document.querySelector('.leaflet-popup-content').innerHTML; } });
+  return html || '';
+});
+assert(/per 1,000/.test(agencyPopup) && /WASPC/.test(agencyPopup), 'agency popup shows rates and the WASPC source');
+await page.evaluate(() => WAMAP.map.closePopup());
 const total = await page.locator('.crime-total').textContent();
 assert(/incidents in view/.test(total), 'viewport totals rendered: "' + total.trim() + '"');
+// Count check on Seattle alone: switch every other incident feed off.
+for (const id of await page.evaluate(() => WAMAP.CONFIG.CRIME.cities.map(c => c.id).filter(c => c !== 'seattle'))) {
+  await page.locator('#crime-city-' + id).click();
+}
+await page.waitForTimeout(500);
 // MVT classification check: "Theft From Motor Vehicle" must be theft, not MVT.
-// Only Seattle is inside the current viewport, so expect 1 of each there.
 const counts = await page.evaluate(() => ({
   mvt: document.getElementById('crime-count-mvt').textContent,
   theft: document.getElementById('crime-count-theft').textContent
@@ -378,7 +452,11 @@ const cls = await page.evaluate(() => [
   ['AGGRAVATED ASSAULT||ASSAULT OFFENSES', 'assault'],
   ['MALICIOUS HARASSMENT', 'assault'],
   ['ARSON', 'arson'],
-  ['MURDER & NONNEGLIGENT MANSLAUGHTER', 'homicide']
+  ['MURDER & NONNEGLIGENT MANSLAUGHTER', 'homicide'],
+  ['Theft - Vehicle Prowl', 'theft'],
+  ['VUCSA - MISDEMEANOR', 'drugs'],
+  ['Criminal Mischi', 'vandalism'],
+  ['STOLEN VEHICLE', 'mvt']
 ].map(([t, want]) => ({ t, want, got: WAMAP.classifyCrime(t).id })));
 for (const c of cls) assert(c.got === c.want, `classify "${c.t}" -> ${c.got} (want ${c.want})`);
 // drugs is off by default
@@ -405,7 +483,7 @@ await page.waitForTimeout(1200);
 const items = await page.locator('.search-item').count();
 assert(items >= 1, 'search returned results');
 const srcText = await page.locator('.search-src >> nth=0').textContent();
-assert(/Census/.test(srcText), 'address routed to Census geocoder: "' + srcText + '"');
+assert(/Esri/.test(srcText), 'address resolved by the Esri World Geocoder: "' + srcText + '"');
 await page.locator('.search-item >> nth=0').click();
 await page.waitForTimeout(1300);
 assert(await page.locator('.search-pin').count() === 1, 'search marker placed');

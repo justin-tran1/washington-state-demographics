@@ -1,9 +1,9 @@
 # Washington Explorer
 
 An interactive mapping app for Washington state: demographics, health-insurance coverage,
-amenities, transit, crime, and 5/10/15-minute drive-time analysis — all fetched live from
-public, authoritative data services. Pure static site (Leaflet + vanilla JS, no build step),
-designed to run on GitHub Pages.
+amenities, transit, crime, and 5/10/15-minute drive-time analysis from public, authoritative
+data sources. Pure static site (Leaflet + vanilla JS, no front-end build step) on GitHub
+Pages; a scheduled GitHub Action pre-builds the statewide datasets into `data/`.
 
 **Live site:** https://justin-tran1.github.io/washington-state-demographics/ (once this is merged
 to the default branch). Locally, open `index.html` via any static web server.
@@ -19,40 +19,54 @@ app is relative, so it works unchanged at either location.
 | Toggleable base maps | 16 keyless base maps in 5 groups: OpenStreetMap, OSM Humanitarian, Esri Streets/Light Gray/Dark Gray/Imagery/Topographic, USGS Imagery, Imagery+Topo, Topo, Shaded Relief, Hydrography, OpenTopoMap, OPNVKarte transit, CyclOSM, WSDOT Washington base |
 | Labels above data | Optional transparent reference layer drawn in its own pane above the choropleths, so place names stay readable through a fill |
 | CBRE theming | Official CBRE brand palette throughout, with an Auto / Light / Dark switch; dark mode uses CBRE Dark Green panels with Accent Green highlights |
-| Address search | U.S. Census Bureau Geocoder for street addresses, OSM Nominatim for places/POIs; jump-to with action popup |
+| Address search | Esri World Geocoder (keyless, limited to Washington) for addresses and places, OSM Nominatim fallback; jump-to with action popup |
 | Pin dropping | Pin mode (Esc to exit), draggable pins, reverse-geocoded labels, persisted in `localStorage` |
 | Demographics layer | Choropleth by county (statewide) or census tract (zoom 9+): population density, total population, median household income, median age, % bachelor's+, median home value, median gross rent, poverty rate, unemployment, owner-occupancy. Click any area for a full profile |
 | Health-insurance layer | % uninsured / % insured (civilian noninstitutionalized population), same county/tract engine |
-| Amenities layer | Schools (NCES public + private), colleges (NCES postsecondary), grocery, restaurants/cafes, retail, pharmacies, hospitals/clinics, banks, fuel/EV, parks — per-category toggles, clustered markers, viewport-based loading |
-| Transit layer | Statewide routes and stops from WSDOT's consolidated GTFS (all WA agencies), styled by mode (bus, light rail/streetcar, rail, ferry), plus WSF ferry routes |
-| Crime layer | Incident-level police reports for Seattle, Tacoma, and Spokane with per-category filters (homicide, assault, robbery, sex offenses, burglary, larceny/theft, motor-vehicle theft, arson, vandalism, fraud, drugs, weapons, DUI, trespass…), 30/90/180/365-day ranges, clustered points or heat map, live in-view counts |
+| Amenities layer | Schools, colleges, grocery, restaurants/cafes, retail, pharmacies, hospitals/clinics, banks/credit unions, fuel/EV charging, parks/playgrounds — every category loaded statewide (no per-view caps or zoom limits), authoritative registries merged with OpenStreetMap; hospitals always visible and never clustered |
+| Transit layer | Statewide routes and stops from WSDOT's consolidated GTFS (all WA agencies), styled by mode (bus, light rail/streetcar, rail, ferry), plus WSF ferry routes. Route popups link to the agency website and the route's schedule page |
+| Crime layer | Statewide: every agency's annual NIBRS offense totals (WASPC), sized by offenses and colored by rate per 1,000. Incident level: Seattle, Tacoma, Bellevue, Redmond, Kirkland, Everett, Yakima, Pierce County Sheriff, King County Sheriff and Auburn. Per-category filters, 30/90/180/365-day ranges, clustered points or heat map, live in-view counts |
 | Drive-time tool | 5/10/15-minute drive-time areas (isochrones) around any address, pin, or clicked point, with estimated population, households, and income inside each band |
 | Shareable links | The URL hash tracks view, basemap, active layers, choropleth metrics, and drive-time origin; "Copy link" hands a colleague the exact analysis |
 
 ## Data sources (and why they were chosen)
 
-Everything loads at runtime from public, keyless, CORS-enabled services. The only bundled
-data is a fallback copy of county boundaries.
+The heavy, rate-limited or key-gated sources are fetched **at build time** by
+`.github/workflows/build-data.yml` (monthly, plus weekly for crime incident files, and on
+every change to `scripts/build-data/`) and committed as compact JSON under `data/`. The
+browser loads those files same-origin from GitHub Pages, so no viewer's network has to
+reach the Census API (which has required a key since May 2026), Overpass or a dozen
+registries. A failed source never blocks the others: the last good file stays in place and
+`data/manifest.json` records what each step fetched.
 
 | Layer | Source | Notes |
 |---|---|---|
-| Demographics & insurance | [U.S. Census Bureau ACS 5-Year Estimates](https://www.census.gov/programs-surveys/acs) via the [Census Data API](https://api.census.gov/data.html) | The authoritative source for sub-county demographics. ACS 5-year is the only dataset published for **every** census tract; the app auto-detects the newest vintage. Insurance comes from subject table **S2701**, the standard federal measure of coverage below county level |
-| Boundaries | [Census TIGERweb](https://tigerweb.geo.census.gov/arcgis/rest/services) generalized services | Official cartographic tract/county boundaries matching the ACS vintage; `data/wa_counties.geojson` (built from Census cartographic boundary files via [us-atlas](https://github.com/topojson/us-atlas)) is a bundled fallback |
-| Schools & colleges | [NCES EDGE geocoded school locations](https://nces.ed.gov/programs/edge/geographic/schoollocations) (`nces.ed.gov/opengis`) | Federal point locations from CCD (public), PSS (private), IPEDS (postsecondary); newest school year auto-selected; OSM fallback if unreachable |
-| Other amenities | [OpenStreetMap](https://www.openstreetmap.org) via [Overpass API](https://overpass-api.de) | The most complete open nationwide POI dataset; fetched live per viewport, endpoint failover |
-| Transit | [WSDOT statewide consolidated GTFS](https://data.wsdot.wa.gov/arcgis/rest/services/Shared/TransitData/FeatureServer) + [WSDOT Ferry Routes](https://data.wsdot.wa.gov/arcgis/rest/services/Shared/FerryRoutes/MapServer) | WSDOT merges every WA transit agency's GTFS feed into one statewide routes/stops dataset — broader than any single agency feed; OSM fallback |
-| Crime — Seattle | [SPD Crime Data: 2008-Present](https://data.seattle.gov/Public-Safety/SPD-Crime-Data-2008-Present/tazs-3rd5) (Socrata, NIBRS) | Updated daily; locations generalized to the 100-block |
-| Crime — Tacoma | [City of Tacoma Reported Crime](https://data.cityoftacoma.org/datasets/tacoma::city-of-tacoma-reported-crime-tacoma/about) (ArcGIS) | NIBRS-based; the city excludes DV and sex offenses from public data |
-| Crime — Spokane | [City of Spokane open GIS](https://my.spokanecity.org/opendata/gis/) CrimePoints service | Incident points from the city's open-data GIS |
-| Drive times | [Valhalla](https://github.com/valhalla/valhalla) routing engine on the public [FOSSGIS server](https://valhalla.openstreetmap.de) | Open-source isochrones over the OSM road network (road class, speed limits, turn costs). Free keyless services model **typical** conditions, not live congestion — the UI says so explicitly |
-| Geocoding | [Census Geocoder](https://geocoding.geo.census.gov/geocoder/) + [Nominatim](https://nominatim.org) | Census is the most accurate free geocoder for US street addresses; Nominatim covers places/POIs |
+| Demographics & insurance | [U.S. Census Bureau ACS 5-Year](https://www.census.gov/programs-surveys/acs) table-based Summary Files (keyless) → `data/acs/` | The only dataset published for **every** census tract; newest vintage detected automatically. Insurance from detailed table **B27010** (uninsured lines / universe), equivalent to subject table S2701. Setting a `CENSUS_API_KEY` secret switches the build to the Census Data API |
+| Boundaries | [Census TIGERweb](https://tigerweb.geo.census.gov/arcgis/rest/services) generalized services → `data/geo/` | Tract and county polygons pre-built; live TIGERweb and `data/wa_counties.geojson` remain fallbacks |
+| Hospitals & clinics | WA DOH licensed hospitals; CMS Provider of Services (hospitals, CAHs, FQHCs, rural health clinics, surgery centers) via HRSA; VHA facilities; HRSA health center sites; WA DOH public health clinics; OSM | The previous live Overpass query was capped at 600 results per view and printed clinic nodes before hospital campuses, so hospitals were cut off first |
+| Pharmacies | WA DOH licensed pharmacies (HELMS) when available, else the NPPES NPI registry (Census-geocoded); OSM | OSM alone maps well under half of WA pharmacies |
+| Grocery | USDA SNAP-authorized retailers; OSM | |
+| Banks & credit unions | FDIC BankFind branches; NCUA call-report credit union branches (Census-geocoded); OSM | |
+| Fuel & EV charging | NREL Alternative Fuels Data Center (public stations); OSM | |
+| Parks & playgrounds | Washington State Parks; USGS PAD-US; OSM | |
+| Schools & colleges | [NCES EDGE geocoded school locations](https://nces.ed.gov/programs/edge/geographic/schoollocations) | CCD (public), PSS (private), IPEDS (postsecondary); newest school year |
+| Restaurants, retail | [OpenStreetMap](https://www.openstreetmap.org) (statewide Overpass extract) | No authoritative statewide registry with coordinates exists |
+| Transit | [WSDOT statewide consolidated GTFS](https://data.wsdot.wa.gov/arcgis/rest/services/Shared/TransitData/FeatureServer) (live) + agency websites from each agency's GTFS `agency.txt` via the [Mobility Database](https://mobilitydatabase.org) → `data/transit/agencies.json` | Route popups use the GTFS `route_url` for schedule pages; OSM fallback |
+| Crime — statewide | [WASPC Crime in Washington](https://data.wa.gov/Public-Safety/Washington-State-Uniform-Crime-Reporting-National-/vvfu-ry7f) (NIBRS, OFM on data.wa.gov) → `data/crime/agencies.json` | Every agency; placed on its Census place (city police) or county (sheriff) |
+| Crime — incidents (live) | Seattle PD (Socrata), Tacoma PD, Bellevue PD, Redmond PD, Kirkland PD, Yakima PD, Pierce County Sheriff (ArcGIS), Everett PD (Socrata) | Queried from the browser; ArcGIS layers are asked only for configured columns |
+| Crime — incidents (pre-built) | King County Sheriff's Office, Auburn PD (Socrata) → `data/crime/` | Published with block addresses only; geocoded weekly with the Census batch geocoder |
+| Drive times | [Valhalla](https://github.com/valhalla/valhalla) routing engine on the public [FOSSGIS server](https://valhalla.openstreetmap.de) | Open-source isochrones over the OSM road network. Free keyless services model **typical** conditions, not live congestion — the UI says so explicitly |
+| Geocoding | [Esri World Geocoder](https://developers.arcgis.com/rest/geocode/) + [Nominatim](https://nominatim.org) | Esri answers keyless with CORS; the Census geocoder sends no CORS header, so browsers cannot use it |
 | Base maps | USGS The National Map, Esri ArcGIS Online, OpenStreetMap + community servers, WSDOT | All keyless; see the licensing section below |
 
-There is no statewide *incident-level* crime feed — incident data is published city by city, so
-the crime layer covers cities with open police data (statewide agency totals are published
-annually as PDFs by [WASPC](https://www.waspc.org/crime-statistics--nibrs-)). Crime category
-filters use one NIBRS keyword rule set across cities so filters behave consistently, but
-reporting practices differ between agencies: **compare within a city, not across cities.**
+There is no statewide *incident-level* crime feed, so the crime layer pairs statewide agency
+totals with incident reports from every department found to publish them openly. Crime
+category filters use one NIBRS keyword rule set across sources so filters behave consistently,
+but reporting practices differ between agencies: **compare within a source, not across
+sources.**
+
+Optional repository secrets: `CENSUS_API_KEY` (Census Data API instead of Summary Files) and
+`DATA_GOV_KEY` (higher NREL / FBI rate limits than `DEMO_KEY`). Neither is required.
 
 ## Accuracy notes
 
@@ -62,8 +76,10 @@ reporting practices differ between agencies: **compare within a city, not across
   materially longer. Population inside bands uses tract-centroid allocation (a tract counts
   if its centroid is inside the band).
 - Crime points are reported offenses, not convictions; some records lack coordinates and are
-  excluded (the layer says how many).
-- OSM amenity completeness varies by area; schools/colleges use NCES federal data instead.
+  excluded (the layer says how many). In WASPC's statewide totals, theft includes
+  motor-vehicle theft and fraud, and DUI / trespass (arrest-only offenses) are not counted.
+- Amenity points from different sources are de-duplicated by name and proximity; OSM
+  completeness still varies by area for restaurants and retail.
 
 ## Architecture
 
@@ -73,9 +89,12 @@ assets/css/app.css         design system (light + dark)
 assets/js/config.js        every endpoint, metric, category, palette token
 assets/js/util.js          fetch/ArcGIS/Socrata/Overpass/Census clients, geocoding, geometry
 assets/js/layers/          choropleth engine, amenities, transit, crime, drive time
+data/                      pre-built datasets (acs/, geo/, amenities/, transit/, crime/, manifest.json)
 data/wa_counties.geojson   bundled county-boundary fallback
+scripts/build-data/        the data pipeline run by the "Build map data" Action (one module per dataset)
+scripts/check-sources.sh   weekly source-health probe ("Check data sources" Action)
 scripts/build_counties.mjs rebuilds the bundled counties from us-atlas
-scripts/smoke-test.mjs     headless-Chromium integration test with mocked API fixtures
+scripts/smoke-test.mjs     headless-Chromium integration test (mocked live APIs, real data/ files)
 ```
 
 Leaflet 1.9.4 + markercluster + heat load from pinned CDN versions (unpkg, jsDelivr
@@ -129,13 +148,12 @@ All 16 are keyless, but their terms differ and that matters for commercial use:
   returning HTTP 200 — so `tileerror` never fires and the map just looks broken. CARTO's own
   `basemap-styles` licence also restricts the tile services to enterprise customers.
 
-Resilience: ACS vintages and TIGERweb services are tried newest-first (generalized
-boundaries, then the detailed current-vintage service); ArcGIS layers and fields are
-discovered by introspection rather than hardcoded ids; the Seattle adapter resolves column
-names from the dataset's live metadata (SPD has republished the dataset with new columns
-before) and has domain failover; Overpass rotates endpoints; NCES/WSDOT fall back to OSM.
-Every layer shows its own source/status line, and failures degrade per-layer with a
-visible message.
+Resilience: every build step is isolated and a failure keeps the last good file; ACS
+vintages, Gazetteer files and TIGERweb services are discovered newest-first; the Seattle
+adapter resolves column names from the dataset's live metadata (SPD has republished the
+dataset with new columns before) and has domain failover; WSDOT falls back to OSM. Every
+layer shows its own source/status line, and failures degrade per-layer with a visible
+message.
 
 ## Development
 
@@ -143,13 +161,20 @@ visible message.
 python3 -m http.server 8137          # serve the app at http://localhost:8137
 node --check assets/js/**/*.js       # syntax check
 
-# integration test (mocked API fixtures, headless Chromium)
+# integration test (mocked live APIs + the committed data/ files, headless Chromium)
 npm i playwright-core leaflet@1.9.4 leaflet.markercluster@1.5.3 leaflet.heat@0.2.0
 CHROMIUM_PATH=/path/to/chromium node scripts/smoke-test.mjs
+
+# rebuild datasets locally (Node 22+, network access); or run the "Build map data" Action
+node scripts/build-data/index.mjs              # every step
+node scripts/build-data/index.mjs amenities    # one step: acs, boundaries, amenities, transit, crime
 ```
 
 ## Attribution
 
-Basemaps © OpenStreetMap contributors, © CARTO, © Esri. Data: U.S. Census Bureau, NCES,
-WSDOT, City of Seattle, City of Tacoma, City of Spokane, OpenStreetMap contributors
-(ODbL), Valhalla/FOSSGIS. This project is not affiliated with any of these providers.
+Basemaps © OpenStreetMap contributors, © Esri, USGS. Data: U.S. Census Bureau, NCES, CMS,
+HRSA, VHA, FDIC, NCUA, USDA FNS, NREL, USGS PAD-US, WA Department of Health, Washington State
+Parks, WSDOT, WASPC / OFM, the Seattle, Tacoma, Bellevue, Redmond, Kirkland, Everett, Yakima
+and Auburn police departments, the King County and Pierce County sheriffs, the Mobility
+Database, OpenStreetMap contributors (ODbL), Valhalla/FOSSGIS. This project is not affiliated
+with any of these providers.
