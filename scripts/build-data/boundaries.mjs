@@ -13,8 +13,8 @@ import { fetchJSON, qs, log, writeJSON, WA_FIPS } from './lib.mjs';
 const BASE = 'https://tigerweb.geo.census.gov/arcgis/rest/services';
 const roots = y => [`${BASE}/Generalized_ACS${y}`, `${BASE}/Generalized_ACS${y - 1}`, `${BASE}/Generalized_ACS${y - 2}`, `${BASE}/TIGERweb`];
 const LEVELS = {
-  county: { service: 'State_County/MapServer', layer: /^Counties$/i, offset: 0.0008, page: 50 },
-  tract: { service: 'Tracts_Blocks/MapServer', layer: /^Census Tracts$/i, offset: 0.0002, page: 250 }
+  county: { service: 'State_County/MapServer', layer: /counties/i, offset: 0.0008, page: 50 },
+  tract: { service: 'Tracts_Blocks/MapServer', layer: /census tracts/i, offset: 0.0003, page: 250 }
 };
 
 /** Esri polygon (clockwise outer rings, counter-clockwise holes) -> GeoJSON geometry. */
@@ -41,8 +41,8 @@ async function level(name, vintage) {
       const info = await fetchJSON(`${root}/${L.service}?f=json`);
       if (info.error) throw new Error(info.error.message);
       // Skip group layers: they share the name but have no fields to query.
-      const layer = (info.layers || []).find(l => L.layer.test(l.name) && !(l.subLayerIds && l.subLayerIds.length));
-      if (!layer) throw new Error(`${name} layer not found`);
+      const layer = (info.layers || []).find(l => L.layer.test(l.name) && !/label/i.test(l.name) && !(l.subLayerIds && l.subLayerIds.length));
+      if (!layer) throw new Error(`${name} layer not found among: ${(info.layers || []).map(l => l.name).join(', ')}`);
       const url = `${root}/${L.service}/${layer.id}`;
       const linfo = await fetchJSON(`${url}?f=json`);
       // Without pagination support a server ignores resultOffset, so one

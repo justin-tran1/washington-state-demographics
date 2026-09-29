@@ -21,7 +21,7 @@
 // Trailing nulls are trimmed from each row to keep the files small.
 
 import {
-  overpass, WA_AREA, arcgisAll, fetchJSON, fetchRetry, qs, log, round, inWA, writeJSON, geocodeBatch
+  overpass, WA_AREA, arcgisAll, fetchJSON, fetchRetry, qs, log, round, inWA, writeJSON, readJSON, geocodeBatch
 } from './lib.mjs';
 
 const FIELDS = ['lat', 'lon', 'name', 'kind', 'src', 'addr', 'ref', 'info', 'web'];
@@ -82,7 +82,8 @@ const OSM = {
       health_food: 'Natural foods', butcher: 'Butcher', deli: 'Deli', wholesale: 'Warehouse club' }[t.shop] || 'Food store')
   },
   banks: {
-    selectors: ['["amenity"="bank"]', '["office"="financial"]["name"~"credit union",i]'],
+    // Credit unions are amenity=bank in OSM too (NCUA supplies the registry).
+    selectors: ['["amenity"="bank"]'],
     kind: t => /credit union|\bcu\b/i.test(`${t.name || ''} ${t.brand || ''} ${t.operator || ''}`) ? 'Credit union' : 'Bank'
   },
   fuel: {
@@ -800,10 +801,23 @@ const CATEGORIES = {
 
 const trimRow = r => { while (r.length && r[r.length - 1] == null) r.pop(); return r; };
 
+/** Rows a source contributed to the previously published file, as merge input. */
+function previousRows(prev, sourceId) {
+  if (!prev || !Array.isArray(prev.rows)) return [];
+  const F = Object.fromEntries(prev.fields.map((f, i) => [f, i]));
+  const srcIdx = prev.sources.findIndex(x => x.id === sourceId);
+  if (srcIdx < 0) return [];
+  return prev.rows.filter(r => r[F.src] === srcIdx).map(r => ({
+    lat: r[F.lat], lon: r[F.lon], name: r[F.name], kind: prev.kinds[r[F.kind]],
+    addr: r[F.addr] || null, ref: r[F.ref] || null, info: r[F.info] || null, web: r[F.web] || null
+  }));
+}
+
 export async function buildAmenities(outDir, only) {
   const summary = {};
   for (const [id, cat] of Object.entries(CATEGORIES)) {
     if (only && !only.includes(id)) continue;
+    const prev = await readJSON(`${outDir}/amenities/${id}.json`, null);
     const got = [];
     const info = [];
     for (const s of cat.sources) {
@@ -814,19 +828,24 @@ export async function buildAmenities(outDir, only) {
         info.push({ id: s.id, fetched: rows.length, ...(rows.services ? { services: rows.services } : {}) });
         log(`${id}: ${s.id} -> ${rows.length}`);
       } catch (err) {
-        info.push({ id: s.id, error: String(err.message || err).slice(0, 300) });
-        log(`${id}: ${s.id} FAILED ${err.message}`);
+        // A transient upstream failure must not thin out the map: carry the
+        // source's rows forward from the last published file instead.
+        const carried = previousRows(prev, s.id);
+        const prevSrc = prev && prev.sources.find(x => x.id === s.id);
+        info.push({ id: s.id, error: String(err.message || err).slice(0, 300), carriedForward: carried.length });
+        log(`${id}: ${s.id} FAILED ${err.message}${carried.length ? ` - keeping ${carried.length} rows from ${prev.built}` : ''}`);
+        if (carried.length) got.push({ s, rows: carried, stale: (prevSrc && prevSrc.asOf) || prev.built });
       }
     }
     if (!got.length) { summary[id] = { error: 'every source failed', sources: info }; continue; }
     const { kept, counts } = merge(got.map(g => g.rows), cat.radius, cat.classOf, cat.classRadius, cat.nameRadius);
-    got.forEach((g, i) => { info.find(x => x.id === g.s.id).kept = counts[i]; });
+    got.forEach((g, i) => { const x = info.find(y => y.id === g.s.id); if (x) x.kept = counts[i]; });
     const kinds = [...new Set(kept.map(r => r.kind))].sort();
     const kindIdx = new Map(kinds.map((k, i) => [k, i]));
     const rows = kept.map(r => trimRow([r.lat, r.lon, r.name, kindIdx.get(r.kind), r.src, r.addr || null, r.ref || null, r.info || null, r.web || null]));
     const bytes = await writeJSON(`${outDir}/amenities/${id}.json`, {
       built: new Date().toISOString(), category: id,
-      sources: got.map((g, i) => ({ id: g.s.id, name: g.s.name, url: g.s.url, count: counts[i] })),
+      sources: got.map((g, i) => ({ id: g.s.id, name: g.s.name, url: g.s.url, count: counts[i], ...(g.stale ? { asOf: g.stale } : {}) })),
       kinds, fields: FIELDS, rows
     });
     summary[id] = { total: rows.length, bytes, sources: info };

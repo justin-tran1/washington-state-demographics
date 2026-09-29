@@ -153,7 +153,8 @@
       const n = cat.markers.length + cat.featured.length;
       if (elc) elc.textContent = '· ' + n.toLocaleString();
       if (lab) lab.title = cat.cfg.label + ': ' + n.toLocaleString() + ' places statewide\n' +
-        d.sources.map(s => '• ' + s.name + ': ' + (s.count || 0).toLocaleString()).join('\n') +
+        d.sources.map(s => '• ' + s.name + ': ' + (s.count || 0).toLocaleString() +
+          (s.asOf ? ' (source unavailable at the last build; kept from ' + String(s.asOf).slice(0, 10) + ')' : '')).join('\n') +
         (d.built ? '\nBuilt ' + String(d.built).slice(0, 10) : '');
     }
 
