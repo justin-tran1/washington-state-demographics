@@ -1,8 +1,14 @@
 /* Washington Explorer — crime layer.
- * Incident-level reports straight from each police department's open-data
- * service: Seattle PD (Socrata/NIBRS), City of Tacoma (ArcGIS), City of
- * Spokane (ArcGIS). Category filters use one keyword rule set applied to each
- * source's NIBRS offense text, so filters behave the same across cities.
+ * Two levels of detail:
+ *  - Statewide: every law-enforcement agency's annual NIBRS offense counts
+ *    (WASPC "Crime in Washington", pre-built into data/crime/agencies.json),
+ *    drawn as circles sized by offenses and colored by rate per 1,000.
+ *  - Incident reports from each department that publishes them: Seattle,
+ *    Tacoma, Bellevue, Redmond, Kirkland, Everett, Yakima and the Pierce
+ *    County Sheriff are queried live; the King County Sheriff and Auburn
+ *    publish block addresses only and are geocoded ahead of time.
+ * One keyword rule set classifies every source's offense text, so the
+ * category filters behave the same everywhere.
  */
 (function () {
   'use strict';
@@ -20,26 +26,45 @@
   }
   WAMAP.classifyCrime = classify; // exposed for tests/console inspection
 
+  const AGENCY_TYPE = { city: 'City police', sheriff: "County sheriff (unincorporated areas and contract cities)", other: 'Other agency' };
+
   WAMAP.createCrime = function (opts) {
     const { map, card } = opts;
     const cluster = L.markerClusterGroup({
       chunkedLoading: true, maxClusterRadius: 50, disableClusteringAtZoom: 17, showCoverageOnHover: false
     });
     let heat = null;
+    const agencyRenderer = L.canvas({ padding: 0.3 });
+    const agencyLayer = L.layerGroup();
+    const legendBox = U.el('div', { class: 'legend-block', 'data-layer': 'crime' });
+    WAMAP.legendHost.appendChild(legendBox);
+    legendBox.style.display = 'none';
 
     const state = {
       enabled: false,
       range: CFG.CRIME.defaultRange,
       mode: 'clusters',
+      showAgencies: true,
+      agencies: { data: null, promise: null, error: null },
       catOn: new Map(CFG.CRIME.categories.map(c => [c.id, CFG.CRIME.defaultOn.includes(c.id)])),
       cities: new Map(CFG.CRIME.cities.map(c => [c.id, {
-        cfg: c, on: true, status: 'idle', incidents: [], truncated: false, error: null, noCoords: 0, resolved: null
+        cfg: c, on: true, status: 'idle', incidents: [], truncated: false, error: null, noCoords: 0, resolved: null, file: null
       }]))
     };
 
     // ---- panel UI -------------------------------------------------------
     const body = card.querySelector('.card-body');
 
+    const agencyCb = U.el('input', { type: 'checkbox', id: 'crime-agencies' });
+    agencyCb.checked = state.showAgencies;
+    agencyCb.addEventListener('change', () => { state.showAgencies = agencyCb.checked; refreshAgencies(); });
+    const agencyRow = U.el('label', { for: 'crime-agencies', class: 'check-item' }, [
+      agencyCb, U.el('span', { text: 'Every agency statewide (annual totals)' }),
+      U.el('span', { class: 'cat-count', id: 'crime-agency-count', text: '' })
+    ]);
+    const agencyNote = U.el('div', { class: 'hint', id: 'crime-agency-note' });
+
+    const cityHead = U.el('div', { class: 'hint', text: 'Incident reports (department open data):' });
     const cityRow = U.el('div', { class: 'city-chips' });
     for (const [cid, city] of state.cities) {
       const chip = U.el('button', { class: 'city-chip', id: 'crime-city-' + cid, type: 'button', title: city.cfg.note }, [
@@ -94,12 +119,12 @@
           const cb = document.getElementById('crime-cat-' + c.id);
           if (cb) cb.checked = gcb.checked;
         }
-        renderIncidents();
+        onCategoriesChanged();
       });
       for (const c of cats) {
         const cb = U.el('input', { type: 'checkbox', id: 'crime-cat-' + c.id });
         cb.checked = state.catOn.get(c.id);
-        cb.addEventListener('change', () => { state.catOn.set(c.id, cb.checked); syncGroupBox(); renderIncidents(); });
+        cb.addEventListener('change', () => { state.catOn.set(c.id, cb.checked); syncGroupBox(); onCategoriesChanged(); });
         catList.appendChild(U.el('label', { for: 'crime-cat-' + c.id, class: 'check-item sub' }, [
           cb, U.el('span', { text: c.label }),
           U.el('span', { class: 'cat-count', id: 'crime-count-' + c.id, text: '' })
@@ -110,8 +135,8 @@
 
     const totalLine = U.el('div', { class: 'crime-total' });
     const status = U.el('div', { class: 'status-line', text: 'Off' });
-    const note = U.el('div', { class: 'hint', text: 'Incident reports as published by each police department. Compare within a city, not across cities — reporting practices differ.' });
-    body.append(cityRow, controls, catList, totalLine, status, note);
+    const note = U.el('div', { class: 'hint', text: 'Reporting practices differ between departments: compare places within one source, not across sources.' });
+    body.append(agencyRow, agencyNote, cityHead, cityRow, controls, catList, totalLine, status, note);
 
     function setStatus(text, kind) {
       status.textContent = text;
@@ -130,19 +155,139 @@
         chip.title = city.cfg.note + (city.error ? ' — ' + city.error : '');
       }
     }
+    function onCategoriesChanged() { renderIncidents(); renderAgencies(); }
 
-    // ---- adapters -------------------------------------------------------
-    function sinceDate() {
-      const d = new Date(Date.now() - state.range * 86400000);
-      return d;
+    // ---- statewide agencies ----------------------------------------------
+    function loadAgencies() {
+      const a = state.agencies;
+      if (a.data) return Promise.resolve(a.data);
+      if (!a.promise) {
+        a.promise = U.fetchJSON(CFG.CRIME.statewide.file, { timeout: 30000, retries: 1 })
+          .then(d => {
+            if (!d || !Array.isArray(d.rows) || !Array.isArray(d.fields)) throw new Error('unexpected file format');
+            d.F = {};
+            d.fields.forEach((f, i) => { d.F[f] = i; });
+            a.data = d; a.error = null;
+            return d;
+          })
+          .catch(err => { a.promise = null; a.error = err; throw err; });
+      }
+      return a.promise;
     }
+    function selectedCats(d) { return d.cats.filter(c => state.catOn.get(c)); }
+    function agencyCount(d, row, cats) { return cats.reduce((s, c) => s + (row[d.F[c]] || 0), 0); }
+
+    function rateBreaks(values) {
+      const v = values.filter(x => x != null && isFinite(x)).sort((a, b) => a - b);
+      if (!v.length) return null;
+      const q = p => v[Math.min(v.length - 1, Math.floor(p * v.length))];
+      return [q(0.2), q(0.4), q(0.6), q(0.8)];
+    }
+    function rateColors() {
+      const H = CFG.PALETTE.heatGradient;
+      return [H[0.45], H[0.62], H[0.78], H[0.9], H[1.0]];
+    }
+    function classOf(rate, breaks) {
+      if (rate == null || !breaks) return -1;
+      let i = 0;
+      while (i < breaks.length && rate > breaks[i]) i++;
+      return i;
+    }
+
+    function renderAgencies() {
+      agencyLayer.clearLayers();
+      const d = state.agencies.data;
+      if (!state.enabled || !state.showAgencies || !d) { renderLegend(); return; }
+      const cats = selectedCats(d);
+      const F = d.F;
+      const rows = d.rows.map(r => {
+        const n = agencyCount(d, r, cats);
+        const pop = r[F.pop];
+        return { r, n, rate: pop > 0 ? n / pop * 1000 : null };
+      });
+      // Rates are only comparable for agencies that serve a resident
+      // population; the breaks come from those alone.
+      const breaks = rateBreaks(rows.filter(x => x.r[F.pop] >= 1000).map(x => x.rate));
+      const colors = rateColors();
+      const max = Math.max(1, ...rows.map(x => x.n));
+      for (const x of rows.sort((a, b) => b.n - a.n)) { // big circles first, small ones on top
+        const cls = classOf(x.rate, breaks);
+        const radius = 3 + 24 * Math.sqrt(x.n / max);
+        L.circleMarker([x.r[F.lat], x.r[F.lon]], {
+          renderer: agencyRenderer, radius,
+          color: cls < 0 ? CFG.PALETTE.brand.cement : CFG.PALETTE.heatGradient[1.0], weight: 1,
+          fillColor: cls < 0 ? U.theme.colors().noData : colors[cls], fillOpacity: 0.78
+        }).bindPopup(() => agencyPopup(d, x, cats), { maxWidth: 320 }).addTo(agencyLayer);
+      }
+      state.agencies.breaks = breaks;
+      const cnt = document.getElementById('crime-agency-count');
+      if (cnt) cnt.textContent = '· ' + d.rows.length.toLocaleString();
+      const missing = CFG.CRIME.categories.filter(c => state.catOn.get(c.id) && CFG.CRIME.statewide.notCounted[c.id])
+        .map(c => c.label + ' (' + CFG.CRIME.statewide.notCounted[c.id] + ')');
+      agencyNote.textContent = d.year + ' offenses reported to WASPC by ' + d.rows.length + ' agencies' +
+        (missing.length ? '. Not in statewide counts: ' + missing.join(', ') : '') + '.';
+      renderLegend();
+    }
+
+    function agencyPopup(d, x, cats) {
+      const F = d.F, r = x.r;
+      const pop = r[F.pop], total = r[F.total], prev = r[F.prev];
+      const fmtRate = n => (pop > 0 ? (n / pop * 1000).toFixed(1) : '–');
+      const catRows = cats.map(c => {
+        const n = r[F[c]] || 0;
+        return `<tr><td>${U.escapeHTML(CAT_BY_ID[c] ? CAT_BY_ID[c].label : c)}</td><td>${n.toLocaleString()}</td><td>${fmtRate(n)}</td></tr>`;
+      }).join('');
+      const change = prev > 0 ? Math.round((total - prev) / prev * 100) : null;
+      return `<div class="popup-profile"><h3>${U.escapeHTML(r[F.name])}</h3>
+        <div class="popup-cat">${U.escapeHTML(AGENCY_TYPE[r[F.type]] || 'Agency')} · ${U.escapeHTML(titleCounty(r[F.county]))} County</div>
+        <table>
+          <tr><td>Population served</td><td colspan="2">${pop > 0 ? pop.toLocaleString() : 'n/a (no resident population)'}</td></tr>
+          <tr><td>All Group A offenses, ${d.year}</td><td colspan="2">${total.toLocaleString()}${pop > 0 ? ' · ' + fmtRate(total) + ' per 1,000' : ''}</td></tr>
+          ${change != null ? `<tr><td>Change vs ${d.prevYear}</td><td colspan="2">${change > 0 ? '+' : ''}${change}%</td></tr>` : ''}
+          <tr><th>Selected categories</th><th>Offenses</th><th>per 1,000</th></tr>
+          ${catRows || '<tr><td colspan="3">No categories selected</td></tr>'}
+          <tr><td><strong>Selected total</strong></td><td><strong>${x.n.toLocaleString()}</strong></td><td><strong>${fmtRate(x.n)}</strong></td></tr>
+        </table>
+        <div class="popup-src">Source: <a href="${U.escapeHTML(d.url)}" target="_blank" rel="noopener">WASPC Crime in Washington ${d.year}</a> (NIBRS). Theft includes vehicle theft and fraud.</div></div>`;
+    }
+    const titleCounty = s => String(s || '').toLowerCase().replace(/\b\w/g, c => c.toUpperCase());
+
+    function renderLegend() {
+      const d = state.agencies.data;
+      const b = state.agencies.breaks;
+      if (!state.enabled || !state.showAgencies || !d || !b) { legendBox.style.display = 'none'; return; }
+      const colors = rateColors();
+      const stops = ['0', ...b.map(v => v.toFixed(1)), '+'];
+      legendBox.innerHTML =
+        `<div class="legend-title">Crime rate by agency, ${d.year}</div>` +
+        `<div class="legend-sub">selected offenses per 1,000 residents · circle size = number of offenses</div>` +
+        colors.map((c, i) => `<div class="legend-row"><span class="swatch" style="background:${c}"></span><span>${i === colors.length - 1 ? '> ' + stops[i] : stops[i] + ' – ' + stops[i + 1]}</span></div>`).join('') +
+        `<div class="legend-row"><span class="swatch" style="background:${U.theme.colors().noData}"></span><span>No resident population (tribal, campus, port)</span></div>` +
+        `<div class="legend-src">WASPC Crime in Washington via data.wa.gov</div>`;
+      legendBox.style.display = '';
+    }
+
+    async function refreshAgencies() {
+      if (!state.enabled) return;
+      if (state.showAgencies && !map.hasLayer(agencyLayer)) map.addLayer(agencyLayer);
+      if (!state.showAgencies && map.hasLayer(agencyLayer)) map.removeLayer(agencyLayer);
+      if (state.showAgencies && !state.agencies.data) {
+        try { await loadAgencies(); } catch (err) { agencyNote.textContent = 'Statewide totals unavailable: ' + err.message; }
+      }
+      renderAgencies();
+    }
+
+    // ---- incident adapters ------------------------------------------------
+    function sinceDate() { return new Date(Date.now() - state.range * 86400000); }
     function isoDay(d) { return d.toISOString().slice(0, 10); }
+    const tooNew = t => t > Date.now() + 86400000; // feeds occasionally carry future-dated typos
 
     // Column names are resolved against the dataset's live metadata so the
-    // adapter survives SPD's periodic schema changes; known schemas are the
-    // fallback when metadata cannot be fetched.
+    // adapter survives schema changes; known schemas are the fallback when
+    // metadata cannot be fetched.
     async function resolveSocrataSchemas(city) {
       if (city.schemas) return city.schemas;
+      if (city.cfg.fields) { city.schemas = [city.cfg.fields]; return city.schemas; }
       const cands = city.cfg.fieldCandidates;
       try {
         const cols = new Set(await U.socrataColumns(city.cfg.domains, city.cfg.dataset));
@@ -161,14 +306,14 @@
       return city.schemas;
     }
 
-    async function fetchSeattle(city) {
+    async function fetchSocrata(city) {
       const schemas = await resolveSocrataSchemas(city);
       const since = isoDay(sinceDate());
       let res = null, f = null, lastErr = null;
       for (const schema of schemas) {
         try {
           res = await U.socrataQuery(city.cfg.domains, city.cfg.dataset, {
-            $select: [schema.date, ...schema.offense, schema.lat, schema.lon, schema.addr, schema.area].filter(Boolean).join(','),
+            $select: [schema.date, ...schema.offense, schema.lat, schema.lon, schema.point, schema.addr, schema.area].filter(Boolean).join(','),
             $where: `${schema.date} >= '${since}'`,
             $order: `${schema.date} DESC`
           }, { maxRows: CFG.CRIME.maxPerCity });
@@ -181,119 +326,88 @@
       const incidents = [];
       let noCoords = 0;
       for (const r of res.rows) {
-        const lat = parseFloat(r[f.lat]), lon = parseFloat(r[f.lon]);
+        let lat, lon;
+        if (f.point) {
+          const c = r[f.point] && r[f.point].coordinates;
+          lon = c ? +c[0] : NaN; lat = c ? +c[1] : NaN;
+        } else { lat = parseFloat(r[f.lat]); lon = parseFloat(r[f.lon]); }
+        // Seattle writes the literal string "REDACTED" for suppressed locations.
         if (!isFinite(lat) || !isFinite(lon) || Math.abs(lat) < 1) { noCoords++; continue; }
+        const date = r[f.date] ? new Date(r[f.date]) : null;
+        if (date && tooNew(date.getTime())) continue;
         const texts = f.offense.map(k => r[k]).filter(Boolean);
         const cat = classify(texts.join('||'));
         incidents.push({
-          lat, lon, catId: cat.id, group: cat.group,
-          offense: texts[0] || 'Offense',
-          date: r[f.date] ? new Date(r[f.date]) : null,
+          lat, lon, catId: cat.id, group: cat.group, offense: texts[0] || 'Offense', date,
           addr: (f.addr && r[f.addr]) || (f.area && r[f.area]) || '', cityId: city.cfg.id
         });
       }
       return { incidents, truncated: res.truncated, noCoords };
     }
 
-    async function resolveArcgisCity(city) {
-      if (city.resolved) return city.resolved;
-      const cfg = city.cfg;
-      let layerUrls = [];
-      if (cfg.type === 'arcgis-item') {
-        const item = await U.fetchJSON(`${cfg.portal}/sharing/rest/content/items/${cfg.itemId}?f=json`, { timeout: 20000 });
-        if (!item.url) throw new Error('item has no service URL');
-        const svcUrl = item.url.replace(/\/+$/, '');
-        if (/\/\d+$/.test(svcUrl)) layerUrls = [svcUrl];
-        else {
-          const info = await U.arcgis.serviceInfo(svcUrl);
-          layerUrls = (info.layers || []).map(l => `${svcUrl}/${l.id}`);
-        }
-      } else {
-        const info = await U.arcgis.serviceInfo(cfg.service);
-        // Era-named layers (e.g. "2025 Smith"): newest first.
-        const layers = (info.layers || []).slice().sort((a, b) => {
-          const ya = (String(a.name).match(/(\d{4})/) || [0, 0])[1];
-          const yb = (String(b.name).match(/(\d{4})/) || [0, 0])[1];
-          return (+yb) - (+ya);
+    /** ArcGIS layer with configured field names (url + fields). */
+    async function fetchArcgis(city) {
+      const cfg = city.cfg, fl = cfg.fields;
+      if (!city.resolved) {
+        const info = await U.arcgis.layerInfo(cfg.url);
+        city.resolved = { pageSize: Math.min(2000, info.maxRecordCount || 1000) };
+      }
+      const since = sinceDate();
+      // Only the configured columns are ever requested: some layers also
+      // carry officer names or narratives that have no place on a map.
+      const outFields = [fl.date, ...fl.offense, fl.addr, fl.lat, fl.lon].filter(Boolean).join(',');
+      const params = { outFields, geometryPrecision: 6, orderByFields: `${fl.date} DESC`,
+        where: `${fl.date} >= TIMESTAMP '${isoDay(since)} 00:00:00'` };
+      const opts = { pageSize: city.resolved.pageSize, maxFeatures: CFG.CRIME.maxPerCity };
+      let fc;
+      try { fc = await U.arcgis.query(cfg.url, params, opts); }
+      catch (e) { // some servers reject TIMESTAMP syntax — retry with DATE
+        fc = await U.arcgis.query(cfg.url, Object.assign({}, params, { where: `${fl.date} >= DATE '${isoDay(since)}'` }), opts);
+      }
+      const incidents = [];
+      let noCoords = 0;
+      for (const f of fc.features) {
+        const p = f.properties || {};
+        let lat, lon;
+        if (fl.lat && fl.lon) { lat = +p[fl.lat]; lon = +p[fl.lon]; }
+        else if (f.geometry && f.geometry.type === 'Point') { lon = f.geometry.coordinates[0]; lat = f.geometry.coordinates[1]; }
+        if (!isFinite(lat) || !isFinite(lon) || !lat || Math.abs(lat) < 1) { noCoords++; continue; }
+        const raw = p[fl.date];
+        const t = raw == null ? NaN : (typeof raw === 'number' ? raw : Date.parse(raw));
+        if (isFinite(t) && (t < since.getTime() || tooNew(t))) continue; // belt & braces if where was ignored
+        const texts = fl.offense.map(k => p[k]).filter(Boolean).map(String);
+        const cat = classify(texts.join('||'));
+        incidents.push({
+          lat, lon, catId: cat.id, group: cat.group, offense: texts[0] || 'Offense',
+          date: isFinite(t) ? new Date(t) : null, addr: (fl.addr && p[fl.addr]) || '', cityId: cfg.id
         });
-        layerUrls = layers.map(l => `${cfg.service}/${l.id}`);
       }
-      const resolved = [];
-      for (const url of layerUrls.slice(0, 4)) {
-        try {
-          const info = await U.arcgis.layerInfo(url);
-          if (info.type && !/feature/i.test(info.type)) continue;
-          const fields = info.fields || [];
-          const dateFields = fields.filter(fd => fd.type === 'esriFieldTypeDate');
-          const dateField = (dateFields.find(fd => /occur|offense|start|incident/i.test(fd.name)) ||
-            dateFields.find(fd => /report|date/i.test(fd.name)) || dateFields[0] || {}).name || null;
-          const offenseFields = fields.filter(fd =>
-            fd.type === 'esriFieldTypeString' && /offen|crime|nibrs|categor|descr|type/i.test(fd.name)
-          ).map(fd => fd.name).slice(0, 4);
-          const addrField = (fields.find(fd =>
-            fd.type === 'esriFieldTypeString' && /address|block|intersect|location/i.test(fd.name)) || {}).name || null;
-          resolved.push({
-            url, dateField, offenseFields, addrField,
-            pageSize: Math.min(2000, info.maxRecordCount || 2000)
-          });
-        } catch (e) { /* skip unreadable layer */ }
-      }
-      if (!resolved.length) throw new Error('no queryable layers');
-      city.resolved = resolved;
-      return resolved;
+      return { incidents, truncated: fc.features.length >= CFG.CRIME.maxPerCity, noCoords };
     }
 
-    async function fetchArcgisCity(city) {
-      const layers = await resolveArcgisCity(city);
-      const since = sinceDate();
-      const incidents = [];
-      let truncated = false, noCoords = 0;
-      for (const lyr of layers) {
-        if (incidents.length >= CFG.CRIME.maxPerCity) { truncated = true; break; }
-        const params = { outFields: '*', geometryPrecision: 6 };
-        if (lyr.dateField) {
-          params.where = `${lyr.dateField} >= TIMESTAMP '${isoDay(since)} 00:00:00'`;
-          params.orderByFields = `${lyr.dateField} DESC`;
-        } else {
-          params.where = '1=1';
-        }
-        let fc;
-        try {
-          fc = await U.arcgis.query(lyr.url, params, {
-            pageSize: lyr.pageSize, maxFeatures: CFG.CRIME.maxPerCity - incidents.length
-          });
-        } catch (e) {
-          if (!lyr.dateField) throw e;
-          // Some servers reject TIMESTAMP syntax — retry with DATE.
-          params.where = `${lyr.dateField} >= DATE '${isoDay(since)}'`;
-          fc = await U.arcgis.query(lyr.url, params, {
-            pageSize: lyr.pageSize, maxFeatures: CFG.CRIME.maxPerCity - incidents.length
-          });
-        }
-        for (const f of fc.features) {
-          if (!f.geometry || f.geometry.type !== 'Point') { noCoords++; continue; }
-          const [lon, lat] = f.geometry.coordinates;
-          if (!isFinite(lat) || Math.abs(lat) < 1) { noCoords++; continue; }
-          const p = f.properties || {};
-          const text = lyr.offenseFields.map(k => p[k]).filter(Boolean).join('||');
-          if (lyr.dateField && p[lyr.dateField] != null) {
-            const t = typeof p[lyr.dateField] === 'number' ? p[lyr.dateField] : Date.parse(p[lyr.dateField]);
-            if (isFinite(t) && t < since.getTime()) continue; // belt & braces if where was ignored
-          }
-          const cat = classify(text);
-          incidents.push({
-            lat, lon, catId: cat.id, group: cat.group,
-            offense: (lyr.offenseFields.map(k => p[k]).find(Boolean)) || 'Offense',
-            date: lyr.dateField && p[lyr.dateField] != null
-              ? new Date(typeof p[lyr.dateField] === 'number' ? p[lyr.dateField] : Date.parse(p[lyr.dateField]))
-              : null,
-            addr: (lyr.addrField && p[lyr.addrField]) || '', cityId: city.cfg.id
-          });
-        }
+    /** Pre-built, geocoded file (data/crime/<id>.json): filtered by range here. */
+    async function fetchPrebuilt(city) {
+      if (!city.file) {
+        const d = await U.fetchJSON(city.cfg.file, { timeout: 30000, retries: 1 });
+        if (!d || !Array.isArray(d.rows)) throw new Error('unexpected file format');
+        city.file = d;
       }
-      if (incidents.length >= CFG.CRIME.maxPerCity) truncated = true;
-      return { incidents, truncated, noCoords };
+      const d = city.file;
+      const from = Date.parse(d.from);
+      const since = sinceDate().getTime();
+      const cats = d.offenses.map(o => classify(o));
+      const incidents = [];
+      for (const r of d.rows) {
+        const t = from + r[2] * 60000;
+        if (t < since) continue;
+        const cat = cats[r[3]];
+        incidents.push({ lat: r[0], lon: r[1], catId: cat.id, group: cat.group, offense: d.offenses[r[3]],
+          date: new Date(t), addr: d.addrs[r[4]] || '', cityId: city.cfg.id });
+      }
+      return { incidents, truncated: false, noCoords: 0 };
     }
+
+    const ADAPTERS = { socrata: fetchSocrata, arcgis: fetchArcgis, prebuilt: fetchPrebuilt };
 
     async function fetchCity(cid) {
       const city = state.cities.get(cid);
@@ -301,8 +415,9 @@
       city.status = 'busy';
       city.error = null;
       updateCityChips();
+      updateStatusLine();
       try {
-        const res = city.cfg.type === 'socrata' ? await fetchSeattle(city) : await fetchArcgisCity(city);
+        const res = await ADAPTERS[city.cfg.type](city);
         city.incidents = res.incidents;
         city.truncated = res.truncated;
         city.noCoords = res.noCoords;
@@ -319,7 +434,8 @@
 
     function updateStatusLine() {
       const parts = [];
-      let anyBusy = false, truncated = [];
+      let anyBusy = false;
+      const truncated = [];
       for (const [, city] of state.cities) {
         if (!city.on) continue;
         if (city.status === 'busy') anyBusy = true;
@@ -330,11 +446,11 @@
       if (errs.length) parts.push(errs.map(c => c.cfg.label + ' unavailable').join(', '));
       if (truncated.length) parts.push('capped at ' + CFG.CRIME.maxPerCity.toLocaleString() + ' newest for ' + truncated.join(', '));
       const noC = Array.from(state.cities.values()).reduce((a, c) => a + (c.on ? c.noCoords : 0), 0);
-      if (noC) parts.push(noC.toLocaleString() + ' records without coordinates excluded');
+      if (noC) parts.push(noC.toLocaleString() + ' records without a published location excluded');
       setStatus(parts.length ? parts.join(' · ') : 'Loaded', errs.length ? 'err' : 'ok');
     }
 
-    // ---- rendering ------------------------------------------------------
+    // ---- incident rendering -------------------------------------------------
     function activeIncidents() {
       const out = [];
       for (const [, city] of state.cities) {
@@ -351,7 +467,18 @@
         ${U.escapeHTML(cat.label)}</div>
         ${inc.date ? `<div>${U.escapeHTML(inc.date.toLocaleString())}</div>` : ''}
         ${inc.addr ? `<div>${U.escapeHTML(inc.addr)}</div>` : ''}
-        <div class="popup-src">Source: <a href="${city.cfg.link}" target="_blank" rel="noopener">${U.escapeHTML(city.cfg.label)} open data</a></div></div>`;
+        <div class="popup-src">Source: <a href="${U.escapeHTML(city.cfg.link)}" target="_blank" rel="noopener">${U.escapeHTML(city.cfg.label)} open data</a></div></div>`;
+    }
+    const dotIcons = {};
+    function dotIcon(group) {
+      const color = U.theme.colors().crimeGroups[group];
+      if (!dotIcons[color]) {
+        dotIcons[color] = L.divIcon({
+          className: 'poi-icon', html: `<span class="crime-dot" style="background:${color}"></span>`,
+          iconSize: [12, 12], iconAnchor: [6, 6], popupAnchor: [0, -6]
+        });
+      }
+      return dotIcons[color];
     }
     function renderIncidents() {
       if (!state.enabled) return;
@@ -360,20 +487,16 @@
       if (heat) { map.removeLayer(heat); heat = null; }
       if (state.mode === 'clusters') {
         if (!map.hasLayer(cluster)) map.addLayer(cluster);
-        const markers = incidents.map(inc =>
-          L.marker([inc.lat, inc.lon], {
-            icon: L.divIcon({
-              className: 'poi-icon',
-              html: `<span class="crime-dot" style="background:${U.theme.colors().crimeGroups[inc.group]}"></span>`,
-              iconSize: [12, 12], iconAnchor: [6, 6], popupAnchor: [0, -6]
-            })
-          }).bindPopup(incidentPopup(inc), { maxWidth: 300 }));
-        cluster.addLayers(markers);
+        cluster.addLayers(incidents.map(inc =>
+          L.marker([inc.lat, inc.lon], { icon: dotIcon(inc.group), keyboard: false })
+            .bindPopup(() => incidentPopup(inc), { maxWidth: 300 })));
       } else {
         if (map.hasLayer(cluster)) map.removeLayer(cluster);
-        heat = L.heatLayer(incidents.map(i => [i.lat, i.lon, 0.7]), {
-          radius: 22, blur: 18, maxZoom: 17, gradient: CFG.PALETTE.heatGradient
-        }).addTo(map);
+        if (incidents.length) {
+          heat = L.heatLayer(incidents.map(i => [i.lat, i.lon, 0.7]), {
+            radius: 22, blur: 18, maxZoom: 17, gradient: CFG.PALETTE.heatGradient
+          }).addTo(map);
+        }
       }
       updateViewCounts();
     }
@@ -406,7 +529,7 @@
     });
     modeSel.addEventListener('change', () => { state.mode = modeSel.value; renderIncidents(); });
     map.on('moveend', U.debounce(() => updateViewCounts(), 350));
-    U.theme.onChange(() => { if (state.enabled) renderIncidents(); });
+    U.theme.onChange(() => { if (state.enabled) { renderIncidents(); renderAgencies(); } });
 
     return {
       id: 'crime',
@@ -415,6 +538,7 @@
         if (on === state.enabled) return;
         state.enabled = on;
         if (on) {
+          refreshAgencies();
           for (const [cid, city] of state.cities) {
             if (city.on && city.status === 'idle') fetchCity(cid);
           }
@@ -424,6 +548,9 @@
           cluster.clearLayers();
           if (map.hasLayer(cluster)) map.removeLayer(cluster);
           if (heat) { map.removeLayer(heat); heat = null; }
+          agencyLayer.clearLayers();
+          if (map.hasLayer(agencyLayer)) map.removeLayer(agencyLayer);
+          legendBox.style.display = 'none';
           setStatus('Off');
         }
       }

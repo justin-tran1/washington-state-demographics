@@ -94,7 +94,10 @@ export async function buildTransit(outDir) {
   try {
     const feeds = parseCSV(await fetchText(CATALOG, {}, { timeoutMs: 120000 }))
       .filter(r => r.data_type === 'gtfs' && r['location.country_code'] === 'US' &&
-        /washington/i.test(r['location.subdivision_name'] || '') && !/deprecated|inactive/i.test(r.status || ''));
+        /washington/i.test(r['location.subdivision_name'] || '') && !/deprecated/i.test(r.status || ''))
+      // Deprecated feeds redirect to a replacement; inactive ones still carry
+      // a valid agency_url, so they stay but are read after the active ones.
+      .sort((a, b) => (/inactive/i.test(a.status || '') ? 1 : 0) - (/inactive/i.test(b.status || '') ? 1 : 0));
     log(`catalog: ${feeds.length} Washington GTFS feeds`);
     for (const feed of feeds) {
       const url = feed['urls.latest'] || feed['urls.direct_download'];

@@ -16,27 +16,49 @@
     tractIndex: null, tractIndexPromise: null, // statewide centroids + land area
     tractIndexById: null, // GEOID -> index entry
 
+    // Boundaries come from the pre-built, same-origin files first (see
+    // scripts/build-data/boundaries.mjs); TIGERweb and the bundled county
+    // file are fallbacks for a missing or stale build.
     async loadCounties() {
       if (this.counties) return this.counties;
       if (this.countiesPromise) return this.countiesPromise;
       this.countiesPromise = (async () => {
-        try {
-          const fc = await U.tigerweb.counties();
-          if (!fc.features.length) throw new Error('empty');
-          this.countiesSource = 'tigerweb';
-          this.counties = fc;
-        } catch (e) {
-          const fc = await U.fetchJSON(CFG.TIGERWEB.localCounties, { timeout: 15000 });
-          this.countiesSource = 'bundled';
-          this.counties = fc;
+        const attempts = [
+          ['prebuilt', () => U.fetchJSON(CFG.TIGERWEB.prebuilt.county, { timeout: 20000 })],
+          ['tigerweb', () => U.tigerweb.counties()],
+          ['bundled', () => U.fetchJSON(CFG.TIGERWEB.localCounties, { timeout: 15000 })]
+        ];
+        let lastErr;
+        for (const [source, load] of attempts) {
+          try {
+            const fc = await load();
+            if (!fc || !fc.features || !fc.features.length) throw new Error('empty');
+            this.countiesSource = source;
+            this.counties = fc;
+            return fc;
+          } catch (e) { lastErr = e; }
         }
-        return this.counties;
+        throw lastErr;
       })();
       this.countiesPromise.catch(() => { this.countiesPromise = null; });
       return this.countiesPromise;
     },
 
+    tractsStatewide: null, tractsPromise: null,
     async loadTractsInView(map) {
+      // Statewide file: loaded once, then every tract is available.
+      if (!this.tractsStatewide) {
+        if (!this.tractsPromise) {
+          this.tractsPromise = U.fetchJSON(CFG.TIGERWEB.prebuilt.tract, { timeout: 60000, retries: 1 }).then(fc => {
+            if (!fc || !fc.features || fc.features.length < 1000) throw new Error('incomplete tract file');
+            for (const f of fc.features) this.tractCache.set(f.properties.GEOID, f);
+            this.tractsStatewide = true;
+          });
+          this.tractsPromise.catch(() => { this.tractsPromise = null; });
+        }
+        try { await this.tractsPromise; } catch (e) { /* fall back to TIGERweb for this view */ }
+      }
+      if (this.tractsStatewide) return this.tractCache;
       const bounds = map.getBounds().pad(0.25);
       const fc = await U.tigerweb.tractsInView(bounds);
       for (const f of fc.features) {

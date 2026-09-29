@@ -248,7 +248,9 @@
     tractLayerName: /census tracts/i,
     countyService: 'State_County/MapServer',
     countyLayerName: /counties/i,
-    localCounties: 'data/wa_counties.geojson'
+    localCounties: 'data/wa_counties.geojson',
+    // Same-origin boundaries written by the "Build map data" Action.
+    prebuilt: { county: 'data/geo/counties.json', tract: 'data/geo/tracts.json' }
   };
 
   const SQMI_PER_SQM = 1 / 2589988.110336;
@@ -366,7 +368,9 @@
       [/seattle (center )?monorail/i, 'https://www.seattlemonorail.com'],
       [/seattle streetcar/i, 'https://www.seattle.gov/transportation/getting-around/transit/streetcar'],
       [/washington state ferries|\bwsf\b/i, 'https://wsdot.wa.gov/travel/washington-state-ferries'],
-      [/amtrak/i, 'https://www.amtrakcascades.com']
+      [/amtrak/i, 'https://www.amtrakcascades.com'],
+      [/asotin county ptba|lewiston transit/i, 'https://ridethevalley.org'],
+      [/lewis county transit|twin transit/i, 'https://lewiscountytransit.org']
     ],
     ferryWebsite: 'https://wsdot.wa.gov/travel/washington-state-ferries',
     ferryService: 'https://data.wsdot.wa.gov/arcgis/rest/services/Shared/FerryRoutes/MapServer',
@@ -398,29 +402,40 @@
       { id: 365, label: 'Last 12 months' }
     ],
     defaultRange: 90,
-    maxPerCity: 25000,
+    maxPerCity: 60000,
     // Category rules are applied (in order) against UPPERCASED
     // "offense || parent group" text from each source, so one rule set covers
-    // all cities. First match wins.
+    // every feed. First match wins.
     categories: [
       { id: 'homicide', label: 'Homicide', group: 'person', re: /HOMICIDE|MURDER|MANSLAUGHTER/ },
-      { id: 'sexoff', label: 'Sex offenses', group: 'person', re: /RAPE|SODOMY|FONDLING|SEX OFFENSE|SEXUAL|INDECENT|PEEPING|PORNOGRAPHY|HUMAN TRAFFICKING/ },
+      { id: 'sexoff', label: 'Sex offenses', group: 'person', re: /RAPE|SODOMY|FONDLING|SEX OFFENSE|SEXUAL|INDECENT|PEEPING|PORNOGRAPHY|HUMAN TRAFFICKING|VOYEUR/ },
       { id: 'robbery', label: 'Robbery', group: 'person', re: /ROBBERY/ },
       { id: 'kidnap', label: 'Kidnapping', group: 'person', re: /KIDNAP|ABDUCTION/ },
-      { id: 'assault', label: 'Assault', group: 'person', re: /ASSAULT|INTIMIDATION|HARASSMENT/ },
+      { id: 'assault', label: 'Assault', group: 'person', re: /ASSAULT|INTIMIDATION|HARASSMENT|THREAT|STALK/ },
       { id: 'arson', label: 'Arson', group: 'property', re: /ARSON/ },
-      { id: 'mvt', label: 'Motor vehicle theft', group: 'property', re: /MOTOR VEHICLE THEFT|AUTO THEFT/ },
+      // "Theft From Motor Vehicle" / "Vehicle Prowl" are larceny, not MVT.
+      { id: 'mvt', label: 'Motor vehicle theft', group: 'property', re: /MOTOR VEHICLE THEFT|AUTO THEFT|VEHICLE THEFT|STOLEN VEHICLE|THEFT - (MOTOR )?VEHICLE(\|\||$)|TAKING (A )?MOTOR VEHICLE/ },
       { id: 'burglary', label: 'Burglary / B&E', group: 'property', re: /BURGLARY|BREAKING/ },
-      { id: 'theft', label: 'Larceny / theft', group: 'property', re: /LARCENY|THEFT|SHOPLIFT|PICKPOCKET|PURSE|STOLEN PROPERTY/ },
-      { id: 'vandalism', label: 'Vandalism / property damage', group: 'property', re: /VANDALISM|DESTRUCTION|DAMAGE|MALICIOUS MISCHIEF|GRAFFITI/ },
+      { id: 'theft', label: 'Larceny / theft', group: 'property', re: /LARCENY|THEFT|SHOPLIFT|PICKPOCKET|PURSE|STOLEN PROPERTY|PROWL/ },
+      { id: 'vandalism', label: 'Vandalism / property damage', group: 'property', re: /VANDALISM|DESTRUCTION|DAMAGE|MALICIOUS MISCHIEF|CRIMINAL MISCHI|GRAFFITI/ },
       { id: 'fraud', label: 'Fraud / forgery', group: 'property', re: /FRAUD|FORGERY|COUNTERFEIT|EMBEZZLE|EXTORTION|BAD CHECK|IDENTITY/ },
-      { id: 'drugs', label: 'Drugs / narcotics', group: 'society', re: /DRUG|NARCOTIC/ },
+      { id: 'drugs', label: 'Drugs / narcotics', group: 'society', re: /DRUG|NARCOTIC|VUCSA|CONTROLLED SUBSTANCE/ },
       { id: 'weapons', label: 'Weapons', group: 'society', re: /WEAPON|FIREARM/ },
       { id: 'dui', label: 'DUI', group: 'society', re: /DUI|DRIVING UNDER/ },
       { id: 'trespass', label: 'Trespass', group: 'society', re: /TRESPASS/ },
       { id: 'other', label: 'Other offenses', group: 'other', re: /./ }
     ],
     defaultOn: ['homicide', 'sexoff', 'robbery', 'kidnap', 'assault', 'arson', 'mvt', 'burglary', 'theft', 'vandalism'],
+    // Every agency in the state: annual NIBRS counts compiled by WASPC,
+    // pre-built by scripts/build-data/crime.mjs.
+    statewide: {
+      file: 'data/crime/agencies.json',
+      // Categories the statewide counts cannot split out (see crime.mjs).
+      notCounted: { mvt: 'counted under theft', dui: 'arrest-only (Group B)', trespass: 'arrest-only (Group B)' }
+    },
+    // Incident-level feeds. 'socrata' / 'arcgis' are queried live by the
+    // browser; 'prebuilt' feeds publish block addresses only and are
+    // geocoded ahead of time into data/crime/.
     cities: [
       {
         id: 'seattle', label: 'Seattle', type: 'socrata',
@@ -445,20 +460,66 @@
             lat: 'latitude', lon: 'longitude', addr: '_100_block_address', area: 'mcpp' }
         ],
         link: 'https://data.seattle.gov/Public-Safety/SPD-Crime-Data-2008-Present/tazs-3rd5',
-        note: 'Seattle PD NIBRS incident reports; locations generalized to the 100 block.'
+        note: 'Seattle PD NIBRS offenses, updated daily; locations generalized to the 100 block. SPD redacts the location of most homicides and sex offenses.'
       },
       {
-        id: 'tacoma', label: 'Tacoma', type: 'arcgis-item',
-        itemId: '4b9326bf98c84fe4a1d8526ee6870c2d',
-        portal: 'https://www.arcgis.com',
-        link: 'https://data.cityoftacoma.org/datasets/tacoma::city-of-tacoma-reported-crime-tacoma/about',
-        note: 'City of Tacoma reported crime (NIBRS-based). Tacoma excludes domestic-violence and sex offenses from its public data.'
+        id: 'tacoma', label: 'Tacoma', type: 'arcgis',
+        url: 'https://services3.arcgis.com/SCwJH1pD8WSn5T5y/arcgis/rest/services/TPD_RMS_Crime/FeatureServer/0',
+        fields: { date: 'DateOccurred', offense: ['Description', 'Offense_Category'], addr: 'Address', lat: 'Latitude', lon: 'Longitude' },
+        link: 'https://data.cityoftacoma.org/datasets/a27ad2206f16467793c17d33422c3e91',
+        note: 'Tacoma PD reported crime, updated each business day. Tacoma excludes domestic-violence and sex offenses from its public data.'
       },
       {
-        id: 'spokane', label: 'Spokane', type: 'arcgis-service',
-        service: 'https://services6.arcgis.com/ydggmMcp46DZ7B9Z/ArcGIS/rest/services/CrimePoints/FeatureServer',
-        link: 'https://my.spokanecity.org/opendata/gis/',
-        note: 'City of Spokane police incident points from the city open-data GIS.'
+        id: 'kcso', label: 'King County Sheriff', type: 'prebuilt', file: 'data/crime/kcso.json',
+        link: 'https://data.kingcounty.gov/Law-Enforcement-Safety/KCSO-Offense-Reports-2020-to-Present/4kmt-kfqf',
+        note: "King County Sheriff's Office NIBRS offenses: unincorporated King County and contract cities (Burien, Shoreline, SeaTac, Sammamish, Kenmore, Woodinville, Covington, Maple Valley and others). Block addresses geocoded by the Census Bureau; refreshed weekly."
+      },
+      {
+        id: 'bellevue', label: 'Bellevue', type: 'arcgis',
+        url: 'https://services1.arcgis.com/EYzEZbDhXZjURPbP/arcgis/rest/services/Offenses/FeatureServer/1',
+        fields: { date: 'FROM_DATE', offense: ['LEGEND', 'STAT_KEYWORD'], lat: 'LATITUDE', lon: 'LONGITUDE' },
+        link: 'https://data.bellevuewa.gov/',
+        note: 'Bellevue PD offenses (NIBRS). Some records are published without a location.'
+      },
+      {
+        id: 'redmond', label: 'Redmond', type: 'arcgis',
+        url: 'https://gis.redmond.gov/arcgis/rest/services/CrimeMap/Crimes/FeatureServer/0',
+        fields: { date: 'DateTimeReported', offense: ['OffenseDescription', 'UCR_Description', 'WebSubType'], addr: 'FilteredAddress' },
+        link: 'https://www.redmond.gov/1232/Crime-Map',
+        note: 'Redmond PD crime map data (rolling 12 months); sensitive offenses omitted by the city.'
+      },
+      {
+        id: 'kirkland', label: 'Kirkland', type: 'arcgis',
+        url: 'https://maps.kirklandwa.gov/host/rest/services/Hosted/CrimeAnalysis_(Public)/FeatureServer/2',
+        fields: { date: 'from_date', offense: ['nibrs_desc', 'cm_nibrs_desc'], addr: 'block_address' },
+        link: 'https://www.kirklandwa.gov/Government/Departments/Police',
+        note: 'Kirkland PD public crime-map offenses (NIBRS).'
+      },
+      {
+        id: 'auburn', label: 'Auburn', type: 'prebuilt', file: 'data/crime/auburn.json',
+        link: 'https://data.auburnwa.gov/Public-Safety/Crimes/8g4u-7zzy',
+        note: 'Auburn PD case reports with non-criminal case types removed. Addresses geocoded by the Census Bureau; refreshed weekly.'
+      },
+      {
+        id: 'everett', label: 'Everett', type: 'socrata',
+        domains: ['https://data.everettwa.gov'], dataset: 'szww-y224',
+        fields: { date: 'datetimereceived', offense: ['case'], point: 'geomcoordinate', addr: 'occurredlocationby100block', area: 'neighborhood' },
+        link: 'https://data.everettwa.gov/Public-Safety/Police-Cases/szww-y224',
+        note: 'Everett PD case reports, updated daily. Everett excludes domestic-violence, child-abuse and minor sex cases.'
+      },
+      {
+        id: 'pierce', label: 'Pierce County Sheriff', type: 'arcgis',
+        url: 'https://services2.arcgis.com/1UvBaQ5y1ubjUPmd/arcgis/rest/services/Crime_Data/FeatureServer/1',
+        fields: { date: 'OccurredOn', offense: ['Public_Nam'], addr: 'City' },
+        link: 'https://open.piercecountywa.gov/',
+        note: "Pierce County Sheriff's Department offenses, rolling 12 months, updated monthly: unincorporated Pierce County plus Bonney Lake, Edgewood, Gig Harbor, Puyallup, University Place and others. Locations approximate."
+      },
+      {
+        id: 'yakima', label: 'Yakima', type: 'arcgis',
+        url: 'https://services5.arcgis.com/drBwGNA3YMS2QPJd/arcgis/rest/services/Crimes_public_fc349e427d9945729c4e985666b31686/FeatureServer/0',
+        fields: { date: 'reportdate', offense: ['nibrsdesc'], addr: 'neighborhood' },
+        link: 'https://ypddata.yakimawa.gov/datasets/yakima::crimes-public/about',
+        note: 'Yakima PD NIBRS offenses, updated daily.'
       }
     ]
   };
@@ -476,25 +537,28 @@
   // ---------------------------------------------------------------- sources
   const SOURCES = [
     { section: 'Demographics & health insurance', items: [
-      'U.S. Census Bureau, American Community Survey (ACS) 5-Year Estimates, retrieved live from the Census Data API (api.census.gov). The vintage in use is shown in the layer legend; the app automatically uses the newest published vintage.',
-      'Health insurance coverage: ACS subject table S2701 (civilian noninstitutionalized population), the standard federal source for sub-county insurance coverage.',
-      'Boundaries: U.S. Census Bureau TIGERweb generalized (cartographic) census tracts and counties. Bundled county fallback derived from the Census Bureau cartographic boundary files (via the us-atlas package).',
+      'U.S. Census Bureau, American Community Survey (ACS) 5-Year Estimates for every Washington county and census tract. A GitHub Action reads the Census Bureau\'s keyless ACS Summary Files each month and publishes them with the map, so the browser never calls the Census API (which has required an API key since May 2026). The vintage in use is shown in the layer legend; the newest published vintage is picked up automatically.',
+      'Health insurance coverage: ACS detailed table B27010 (health insurance by age, civilian noninstitutionalized population) - the uninsured share is the "no health insurance coverage" lines over the table universe, the same measure as subject table S2701.',
+      'Land area and tract names: U.S. Census Bureau Gazetteer files. Boundaries: TIGERweb generalized census tracts and the Census cartographic county boundaries.',
       'Median values are ACS estimates and carry margins of error; small tracts have wider error bands. Values suppressed by the Census Bureau are shown as "no data".'
     ]},
     { section: 'Amenities', items: [
-      'Schools and colleges: National Center for Education Statistics (NCES) EDGE geocoded point locations - public schools (Common Core of Data), private schools (PSS), and postsecondary institutions (IPEDS). The newest published school year is selected automatically; if NCES is unreachable the app falls back to OpenStreetMap.',
-      'Shops, grocery, restaurants, pharmacies, hospitals, banks, fuel and parks: OpenStreetMap via the Overpass API, fetched live for the current map view. OSM is the most complete open nationwide POI source; completeness varies by area.'
+      'Every category is pulled for the whole state each month (no per-view caps or zoom limits) and merged from authoritative registries first, then OpenStreetMap to fill gaps. A point that duplicates one from a registry (same name nearby, or the same kind of place at the same spot) is dropped. Hover a category in the panel to see how many places each source contributed.',
+      'Hospitals & clinics: WA Department of Health licensed hospitals; CMS Provider of Services (hospitals, critical access hospitals, federally qualified health centers, rural health clinics, ambulatory surgery centers) via HRSA; Veterans Health Administration facilities; HRSA health center sites; WA DOH local health jurisdiction clinics; plus OpenStreetMap hospitals, clinics, urgent care and doctors\' offices. Hospitals are drawn larger and never clustered.',
+      'Pharmacies: WA DOH licensed pharmacies where available, otherwise community pharmacies from the federal NPI registry (NPPES), geocoded by the U.S. Census Bureau; plus OpenStreetMap.',
+      'Grocery: USDA SNAP-authorized food retailers plus OpenStreetMap. Banks & credit unions: FDIC BankFind branches, NCUA credit union branches (geocoded) and OpenStreetMap. Fuel & EV charging: NREL Alternative Fuels Data Center public stations plus OpenStreetMap. Parks: Washington State Parks, USGS PAD-US public parks and recreation areas, and OpenStreetMap parks and playgrounds.',
+      'Schools and colleges: NCES EDGE geocoded locations of public schools, private schools and postsecondary institutions (newest school year). Restaurants & cafes and Retail & shopping: OpenStreetMap, the most complete open statewide source for businesses; completeness varies by area.'
     ]},
     { section: 'Transit', items: [
       'Washington State Department of Transportation (WSDOT) consolidated statewide GTFS transit data (routes and stops for every transit agency in the state), served from data.wsdot.wa.gov.',
-      'WSDOT Ferry Routes service for Washington State Ferries.',
-      'If WSDOT services are unreachable the app falls back to OpenStreetMap transit route relations and stops.'
+      'Route popups link to the agency\'s website and, where the agency publishes one in its GTFS feed, the route\'s own schedule page. Agency websites come from each agency\'s GTFS agency.txt (found through the Mobility Database feed catalog).',
+      'WSDOT Ferry Routes service for Washington State Ferries. If WSDOT services are unreachable the app falls back to OpenStreetMap transit route relations and stops.'
     ]},
     { section: 'Crime', items: [
-      'Seattle: Seattle Police Department "SPD Crime Data: 2008-Present" (NIBRS), Seattle Open Data portal, updated daily. Locations are generalized to the 100 block.',
-      'Tacoma: City of Tacoma "Reported Crime" open dataset (NIBRS-based). The city excludes domestic-violence and sex offenses from public data.',
-      'Spokane: City of Spokane police incident points (CrimePoints service) from the city open-data GIS.',
-      'Incident-level open police data is published city by city; there is no statewide incident feed. Counts reflect reported offenses, not convictions, and reporting practices differ between agencies - compare within a city, not across cities. Statewide agency totals are published annually by WASPC ("Crime in Washington").'
+      'Statewide: every Washington law-enforcement agency\'s annual NIBRS offense counts from WASPC "Crime in Washington", published by the Office of Financial Management on data.wa.gov. Each agency is drawn where it serves (city police at the city, sheriffs at the county) and colored by offenses per 1,000 residents. In these totals, theft includes motor-vehicle theft and fraud, and DUI and trespass (arrest-only offenses) are not counted.',
+      'Incident reports, queried live: Seattle PD (SPD Crime Data, NIBRS; SPD redacts the location of most homicides and sex offenses), Tacoma PD reported crime (excludes domestic-violence and sex offenses), Bellevue PD offenses, Redmond PD crime map, Kirkland PD crime map, Everett PD police cases (excludes domestic-violence, child-abuse and minor sex cases), Yakima PD offenses, and the Pierce County Sheriff\'s rolling 12-month crime data.',
+      'Incident reports, geocoded weekly by the build: King County Sheriff\'s Office offense reports (unincorporated King County and contract cities) and Auburn PD case reports, which publish block addresses only; the Census Bureau batch geocoder places them.',
+      'Counts reflect reported offenses, not convictions, and reporting practices differ between agencies - compare places within one source, not across sources. Several large departments (among them Spokane, Vancouver, Bellingham, Olympia, Renton, Federal Way, Bremerton and the Snohomish and Clark County sheriffs) publish no open incident feed; they appear in the statewide totals only.'
     ]},
     { section: 'Drive-time areas', items: [
       'Isochrones are computed by the Valhalla open-source routing engine (public FOSSGIS server) over the OpenStreetMap road network, using road classes, speed limits and turn costs.',
@@ -506,7 +570,7 @@
       'Licensing, in plain terms: the USGS National Map services are U.S. federal works in the public domain with no commercial-use restriction - the cleanest option here, and the reason they are offered alongside the commercial alternatives. The Esri services at server.arcgisonline.com are keyless but are legacy raster layers in Esri Mature Support (cartography frozen around 2021, World Imagery excepted and still maintained); an organisation with an ArcGIS entitlement should point these at its own keyed basemap service. OpenStreetMap and the community servers (OSM France, OpenTopoMap, MeMoMaps) are volunteer-funded and ask that heavy or commercial traffic not lean on them.',
       'CARTO Positron and Dark Matter were deliberately removed: CARTO began requiring an API key on basemaps.cartocdn.com in late August 2026 and now stamps anonymous tiles with an "API KEY REQUIRED" watermark while still returning HTTP 200, and CARTO\'s own basemap-styles licence restricts the tile services to enterprise customers.',
       'Place labels can be drawn above the data layers (the "Labels above data layers" option) so street and city names stay readable through a choropleth instead of being buried by it.',
-      'Address search: U.S. Census Bureau Geocoder (street addresses) with OpenStreetMap Nominatim as fallback and for place-name search. Reverse geocoding by Nominatim.'
+      'Address search: Esri World Geocoder (keyless, addresses and places, limited to Washington) with OpenStreetMap Nominatim as fallback. Reverse geocoding by Nominatim.'
     ]},
     { section: 'Colour & accessibility', items: [
       'The interface uses the official CBRE brand palette: CBRE Green #003F2D, Accent Green #17E88F, Dark Green #012A2D, Dark Grey #435254 and the CBRE secondary and chart colours.',
