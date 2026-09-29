@@ -299,7 +299,8 @@ async function fdicBranches() {
           // home/phone banking (15) and administrative (21).
           if ([13, 14, 15, 21, 29].includes(+r.SERVTYPE)) continue;
           const office = r.OFFNAME && r.OFFNAME !== r.NAME ? r.OFFNAME : null;
-          out.push({ lat: round(lat), lon: round(lon), name: r.NAME, kind: +r.MAINOFF === 1 ? 'Bank (main office)' : 'Bank branch',
+          out.push({ lat: round(lat), lon: round(lon), name: String(r.NAME || '').replace(/,?\s+National Association$/i, ', N.A.'),
+            kind: +r.MAINOFF === 1 ? 'Bank (main office)' : 'Bank branch',
             addr: joinAddr(r.ADDRESS, r.CITY), info: office ? `Branch: ${titleCase(office)}` : null });
         }
         if (recs.length < 10000) break;
@@ -395,7 +396,9 @@ async function nppesPharmacies() {
         if (/\brite ?aid\b/i.test(label)) continue; // every Rite Aid closed in 2025; many NPIs were never deactivated
         seen.set(r.number, {
           id: r.number, name: titleCase(label), street: loc.address_1, city: loc.city, zip: String(loc.postal_code || '').slice(0, 5),
-          kind: /retail/i.test(tx.desc) ? 'Pharmacy' : titleCase(tx.desc)
+          // NPPES descriptions read "Pharmacy, Clinic Pharmacy": keep the specific part.
+          kind: /retail/i.test(tx.desc) ? 'Pharmacy'
+            : String(tx.desc).replace(/^pharmacy,\s*/i, '').replace(/^\w/, c => c.toUpperCase()).replace(/ Pharmacy$/, ' pharmacy')
         });
       }
       if (res.length < 200) return skip + res.length;
