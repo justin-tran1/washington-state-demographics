@@ -21,7 +21,7 @@
 // Trailing nulls are trimmed from each row to keep the files small.
 
 import {
-  overpass, WA_AREA, arcgisAll, fetchJSON, qs, log, round, inWA, writeJSON, geocodeBatch
+  overpass, WA_AREA, arcgisAll, fetchJSON, fetchRetry, qs, log, round, inWA, writeJSON, geocodeBatch
 } from './lib.mjs';
 
 const FIELDS = ['lat', 'lon', 'name', 'kind', 'src', 'addr', 'ref', 'info', 'web'];
@@ -52,20 +52,22 @@ const OSM = {
       : 'Clinic'
   },
   pharmacy: {
-    selectors: ['["amenity"="pharmacy"]', '["healthcare"="pharmacy"]', '["shop"="chemist"]["dispensing"="yes"]'],
+    // dispensing=no marks a drugstore without a pharmacy counter.
+    selectors: ['["amenity"="pharmacy"]["dispensing"!="no"]', '["healthcare"="pharmacy"]["dispensing"!="no"]', '["shop"="chemist"]["dispensing"="yes"]'],
     kind: () => 'Pharmacy'
   },
   restaurants: {
+    // shop=coffee is coffee-bean retail, not a cafe, so it stays in retail.
     selectors: ['["amenity"~"^(restaurant|cafe|fast_food|food_court|ice_cream|bar|pub|biergarten)$"]',
-      '["shop"~"^(bakery|coffee|pastry)$"]'],
+      '["shop"~"^(bakery|pastry|ice_cream)$"]'],
     kind: t => ({ restaurant: 'Restaurant', cafe: 'Cafe', fast_food: 'Fast food', food_court: 'Food court',
       ice_cream: 'Ice cream', bar: 'Bar', pub: 'Pub', biergarten: 'Beer garden' }[t.amenity]
-      || ({ bakery: 'Bakery', coffee: 'Coffee shop', pastry: 'Bakery' }[t.shop]) || 'Food & drink')
+      || ({ bakery: 'Bakery', pastry: 'Bakery', ice_cream: 'Ice cream' }[t.shop]) || 'Food & drink')
   },
   retail: {
     // Every shop=* except food retail (its own category), vehicle trade and
     // placeholder values; plus marketplaces.
-    selectors: ['["shop"]["shop"!~"^(supermarket|grocery|greengrocer|convenience|health_food|butcher|deli|bakery|coffee|pastry|wholesale|car|car_repair|car_parts|motorcycle|tyres|fuel|vacant|no|yes|none|disused)$"]',
+    selectors: ['["shop"]["shop"!~"^(supermarket|grocery|greengrocer|convenience|health_food|butcher|deli|bakery|pastry|ice_cream|wholesale|car|car_repair|car_parts|motorcycle|tyres|fuel|vacant|no|yes|none|disused)$"]',
       '["amenity"="marketplace"]'],
     kind: t => t.shop === 'mall' ? 'Shopping mall' : t.shop === 'department_store' ? 'Department store'
       : t.amenity === 'marketplace' ? 'Marketplace'
@@ -86,7 +88,9 @@ const OSM = {
     keepUnnamed: () => true
   },
   parks: {
-    selectors: ['["leisure"~"^(park|playground|nature_reserve|garden|recreation_ground|dog_park)$"]',
+    // leisure=garden is mostly private yards: keep botanical and community gardens only.
+    selectors: ['["leisure"~"^(park|playground|nature_reserve|recreation_ground|dog_park)$"]',
+      '["leisure"="garden"]["garden:type"~"^(botanical|community)$"]',
       '["boundary"="national_park"]', '["boundary"="protected_area"]["protect_class"~"^(2|5)$"]["name"]'],
     kind: t => ({ park: 'Park', playground: 'Playground', nature_reserve: 'Nature reserve', garden: 'Garden',
       recreation_ground: 'Recreation ground', dog_park: 'Dog park' }[t.leisure]
@@ -251,13 +255,16 @@ async function fdicBranches() {
       const out = [];
       for (let offset = 0; ; offset += 10000) {
         const data = await fetchJSON(`${base}?${qs({
-          filters: 'STALP:WA', fields: 'NAME,OFFNAME,ADDRESS,CITY,LATITUDE,LONGITUDE,SERVTYPE_DESC,MAINOFF',
+          filters: 'STALP:WA', fields: 'NAME,OFFNAME,ADDRESS,CITY,LATITUDE,LONGITUDE,SERVTYPE,SERVTYPE_DESC,MAINOFF',
           limit: 10000, offset, format: 'json'
         })}`);
         const recs = (data.data || []).map(d => d.data || d);
         for (const r of recs) {
           const lat = +r.LATITUDE, lon = +r.LONGITUDE;
           if (!isFinite(lat) || !isFinite(lon) || !inWA(lat, lon)) continue;
+          // Skip offices with no public counter: cyber (13), mobile (14, 29),
+          // home/phone banking (15) and administrative (21).
+          if ([13, 14, 15, 21, 29].includes(+r.SERVTYPE)) continue;
           const office = r.OFFNAME && r.OFFNAME !== r.NAME ? r.OFFNAME : null;
           out.push({ lat: round(lat), lon: round(lon), name: r.NAME, kind: +r.MAINOFF === 1 ? 'Bank (main office)' : 'Bank branch',
             addr: joinAddr(r.ADDRESS, r.CITY), info: office ? `Branch: ${titleCase(office)}` : null });
@@ -385,6 +392,170 @@ async function nppesPharmacies() {
   return out;
 }
 
+/**
+ * WA Department of Health HELMS licensing extract: every DOH-credentialed
+ * facility with a geocoded point. Used for pharmacies when the extract
+ * carries them (the licence types are discovered, not assumed).
+ */
+async function helmsPharmacies() {
+  const url = 'https://services8.arcgis.com/rGGrs6HCnw87OFOT/arcgis/rest/services/Facility_HELMS_Report_DEC2025/FeatureServer/0';
+  const types = await fetchJSON(`${url}/query?${qs({ where: '1=1', groupByFieldsForStatistics: 'Regulatory_Authorization_Type__Name',
+    outStatistics: JSON.stringify([{ statisticType: 'count', onStatisticField: 'FID', outStatisticFieldName: 'n' }]), f: 'json' })}`);
+  const list = (types.features || []).map(f => `${f.attributes.Regulatory_Authorization_Type__Name}=${f.attributes.n}`);
+  log(`HELMS licence types: ${list.join(' | ')}`);
+  const wanted = (types.features || []).map(f => f.attributes.Regulatory_Authorization_Type__Name)
+    .filter(t => /pharmac/i.test(t || '') && !/nuclear|wholesal|manufactur|non-?resident|drug other|shopkeeper|research/i.test(t));
+  if (!wanted.length) throw new Error('HELMS extract has no pharmacy licence types');
+  const { features } = await arcgisAll(url, {
+    where: `Regulatory_Authorization_Type__Name IN (${wanted.map(t => `'${t.replace(/'/g, "''")}'`).join(',')})`,
+    outFields: 'Account_Name,Organization_Owner__Account_Name,Regulatory_Authorization_Type__Name,Physical_Address,Mailing_Address,Website,Expiration_Date'
+  });
+  const now = Date.now();
+  const rows = [];
+  for (const f of features) {
+    const a = f.attributes;
+    if (a.Expiration_Date && a.Expiration_Date < now - 90 * 86400000) continue; // lapsed licence
+    const p = pt(f); if (!p) continue;
+    const addr = String(a.Physical_Address || a.Mailing_Address || '').replace(/,?\s*United States$/i, '').replace(/,\s*Washington\s+\d{5}(-\d{4})?$/i, '');
+    rows.push({ ...p, name: titleCase(a.Account_Name || a.Organization_Owner__Account_Name), kind: /hospital|institution/i.test(a.Regulatory_Authorization_Type__Name) ? 'Hospital pharmacy' : 'Pharmacy',
+      addr: addr || null, info: a.Regulatory_Authorization_Type__Name, web: /^https?:\/\//i.test(a.Website || '') ? a.Website : null });
+  }
+  if (rows.length < 400) throw new Error(`only ${rows.length} licensed pharmacies in HELMS (${wanted.join(', ')})`);
+  return rows;
+}
+
+/** WA DOH local health jurisdiction clinics (public health departments). */
+async function dohClinics() {
+  const { features } = await arcgisAll('https://services8.arcgis.com/rGGrs6HCnw87OFOT/arcgis/rest/services/Clinics/FeatureServer/0', {
+    outFields: 'ClinicName,AgencyName,Address1,City,Additional_Info'
+  });
+  const rows = [];
+  for (const f of features) {
+    const p = pt(f); if (!p) continue;
+    const a = f.attributes;
+    rows.push({ ...p, name: a.ClinicName, kind: 'Public health clinic', addr: joinAddr(titleCase(a.Address1), a.City),
+      info: a.AgencyName ? `Operated by ${a.AgencyName}` : null });
+  }
+  if (rows.length < 50) throw new Error(`only ${rows.length} public health clinics`);
+  return rows;
+}
+
+/**
+ * NCUA credit union branches from the latest quarterly call report, geocoded
+ * with the Census batch geocoder (the file carries addresses only). Credit
+ * unions are not FDIC-insured, so FDIC's branch file never lists them.
+ */
+async function ncuaBranches() {
+  const { execFileSync } = await import('node:child_process');
+  const { mkdtemp, writeFile, readFile } = await import('node:fs/promises');
+  const { tmpdir } = await import('node:os');
+  let buf = null, quarter = null;
+  const d = new Date();
+  for (let i = 0; i < 6 && !buf; i++) {
+    const q = new Date(Date.UTC(d.getUTCFullYear(), Math.floor(d.getUTCMonth() / 3) * 3 - 3 * i, 1));
+    const ym = `${q.getUTCFullYear()}-${String(q.getUTCMonth() + 3).padStart(2, '0')}`; // quarter-end month
+    try {
+      const res = await fetchRetry(`https://ncua.gov/files/publications/analysis/call-report-data-${ym}.zip`, {}, { retries: 1, timeoutMs: 180000 });
+      const b = res.ok ? Buffer.from(await res.arrayBuffer()) : null;
+      if (b && b[0] === 0x50 && b[1] === 0x4b) { buf = b; quarter = ym; } // "PK": a real ZIP, not an HTML error page
+    } catch (e) { /* try the previous quarter */ }
+  }
+  if (!buf) throw new Error('no NCUA call report ZIP in the last six quarters');
+  const dir = await mkdtemp(`${tmpdir()}/ncua-`);
+  await writeFile(`${dir}/c.zip`, buf);
+  execFileSync('unzip', ['-o', '-j', '-q', `${dir}/c.zip`, 'Credit Union Branch Information.txt', '-d', dir]);
+  const rows = parseCSV(await readFile(`${dir}/Credit Union Branch Information.txt`, 'latin1'));
+  const wa = rows.filter(r => r.PhysicalAddressStateCode === 'WA' && !/corporate office|administrative/i.test(r.SiteTypeName || '') || (r.PhysicalAddressStateCode === 'WA' && r.MemberServices === '1'));
+  log(`NCUA ${quarter}: ${wa.length} WA member-service sites`);
+  if (wa.length < 200) throw new Error(`only ${wa.length} WA credit union sites`);
+  const coords = await geocodeBatch(wa.map((r, i) => ({ id: String(i), street: r.PhysicalAddressLine1, city: r.PhysicalAddressCity,
+    state: 'WA', zip: String(r.PhysicalAddressPostalCode || '').slice(0, 5) })));
+  const out = [];
+  wa.forEach((r, i) => {
+    const c = coords.get(String(i));
+    if (!c || !inWA(c.lat, c.lon)) return;
+    const site = r.SiteName && r.SiteName !== r.CU_NAME ? titleCase(r.SiteName) : null;
+    out.push({ lat: round(c.lat), lon: round(c.lon), name: titleCase(r.CU_NAME).replace(/\bFcu\b/, 'FCU').replace(/\bCu\b/, 'CU') + (/credit union|\bf?cu\b/i.test(r.CU_NAME) ? '' : ' (credit union)'),
+      kind: 'Credit union', addr: joinAddr(titleCase(r.PhysicalAddressLine1), titleCase(r.PhysicalAddressCity)),
+      info: [site && `Branch: ${site}`, r.HoursOfOperation ? `Hours: ${r.HoursOfOperation}`.slice(0, 120) : null].filter(Boolean).join(' · ') || null });
+  });
+  log(`NCUA: geocoded ${out.length}/${wa.length}`);
+  if (out.length < 150) throw new Error(`only ${out.length} credit union sites geocoded`);
+  return out;
+}
+
+/** Washington State Parks: official park list with entrance points and pages. */
+async function stateParks() {
+  const { features } = await arcgisAll('https://services5.arcgis.com/4LKAHwqnBooVDUlX/arcgis/rest/services/ParkBoundaries/FeatureServer/2', {
+    outFields: 'ParkName,Category,WebPage,Lat_Entrance,Long_Entrance,Acres,LABEL_LOCAL', returnGeometry: false
+  });
+  const rows = [];
+  for (const f of features) {
+    const a = f.attributes;
+    const lat = +a.Lat_Entrance, lon = +a.Long_Entrance;
+    if (!isFinite(lat) || !isFinite(lon) || !inWA(lat, lon)) continue;
+    rows.push({ lat: round(lat), lon: round(lon), name: a.LABEL_LOCAL || `${a.ParkName} ${a.Category || 'State Park'}`,
+      kind: /marine/i.test(a.Category || '') ? 'State marine park' : 'State park',
+      info: a.Acres ? `${Math.round(a.Acres).toLocaleString('en-US')} acres` : null,
+      web: /^https?:\/\//i.test(a.WebPage || '') ? a.WebPage : null });
+  }
+  if (rows.length < 100) throw new Error(`only ${rows.length} state parks`);
+  return rows;
+}
+
+/**
+ * USGS PAD-US 4.x: publicly owned local, state and national parks and
+ * recreation areas (fee-owned parcels). One point per park unit, at the
+ * largest parcel's centroid.
+ */
+async function padusParks() {
+  const url = 'https://services.arcgis.com/v01gqwM5QqNysAAi/arcgis/rest/services/Manager_Type_PADUS/FeatureServer/0';
+  const KIND = { LP: 'Park', LREC: 'Recreation area', SP: 'State park', SREC: 'State recreation area', NP: 'National park', NRA: 'National recreation area' };
+  const { features } = await arcgisAll(url, {
+    where: `State_Nm='WA' AND FeatClass='Fee' AND Des_Tp IN (${Object.keys(KIND).map(k => `'${k}'`).join(',')}) AND (Pub_Access IS NULL OR Pub_Access<>'XA')`,
+    outFields: 'Unit_Nm,Loc_Nm,Mang_Name,Loc_Mang,Des_Tp,GIS_Acres', returnGeometry: true, maxAllowableOffset: 0.0005, geometryPrecision: 5
+  });
+  const units = new Map();
+  for (const f of features) {
+    const a = f.attributes;
+    const c = ringCentroid(f.geometry);
+    if (!c || !inWA(c.lat, c.lon)) continue;
+    const name = cleanParkName(a.Loc_Nm || a.Unit_Nm);
+    if (!name) continue;
+    const k = `${name.toLowerCase()}|${a.Loc_Mang || a.Mang_Name}`;
+    const prev = units.get(k);
+    if (!prev || (a.GIS_Acres || 0) > prev.acres) {
+      units.set(k, { lat: round(c.lat), lon: round(c.lon), name, kind: KIND[a.Des_Tp] || 'Park', acres: a.GIS_Acres || 0,
+        info: [a.Loc_Mang && a.Loc_Mang !== 'UNK' ? `Managed by ${titleCase(a.Loc_Mang)}` : null].filter(Boolean).join(' · ') || null });
+    }
+  }
+  const rows = [...units.values()];
+  if (rows.length < 1000) throw new Error(`only ${rows.length} PAD-US park units`);
+  return rows;
+}
+const cleanParkName = s => {
+  const n = titleCase(String(s || '').trim());
+  // PAD-US fills unnamed units with "<Manager> 123"-style placeholders.
+  return !n || /\b\d{2,}$/.test(n) || /^(unknown|unnamed)/i.test(n) ? null : n;
+};
+/** Area-weighted centroid of an Esri polygon's largest ring (lat/lon). */
+function ringCentroid(g) {
+  if (!g) return null;
+  if (g.centroid) return { lat: g.centroid.y, lon: g.centroid.x };
+  let best = null;
+  for (const ring of g.rings || []) {
+    let a = 0, cx = 0, cy = 0;
+    for (let i = 0, j = ring.length - 1; i < ring.length; j = i++) {
+      const f = ring[j][0] * ring[i][1] - ring[i][0] * ring[j][1];
+      a += f; cx += (ring[j][0] + ring[i][0]) * f; cy += (ring[j][1] + ring[i][1]) * f;
+    }
+    if (!a) continue;
+    const c = { lon: cx / (3 * a), lat: cy / (3 * a), area: Math.abs(a) };
+    if (!best || c.area > best.area) best = c;
+  }
+  return best;
+}
+
 /** NCES public + private K-12 schools, and postsecondary institutions. */
 async function ncesSchools(kind) {
   const folder = kind === 'k12'
@@ -431,6 +602,25 @@ function titleCase(s) {
     .replace(/\b(Of|And|The|At|In|For)\b/g, w => w.toLowerCase())
     .replace(/\b(Ne|Nw|Se|Sw|Po|Llc|Pllc|Cvs|Qfc|Va|Ii|Iii|Iv|Usa|Wa)\b/g, w => w.toUpperCase())
     .replace(/'S\b/g, "'s").replace(/^./, c => c.toUpperCase());
+}
+
+/** RFC-4180 CSV -> array of objects keyed by the header row. */
+function parseCSV(text) {
+  const rows = [];
+  let row = [], field = '', q = false;
+  for (let i = 0; i < text.length; i++) {
+    const c = text[i];
+    if (q) { if (c === '"') { if (text[i + 1] === '"') { field += '"'; i++; } else q = false; } else field += c; }
+    else if (c === '"') q = true;
+    else if (c === ',') { row.push(field); field = ''; }
+    else if (c === '\n' || c === '\r') {
+      if (c === '\r' && text[i + 1] === '\n') i++;
+      row.push(field); field = ''; rows.push(row); row = [];
+    } else field += c;
+  }
+  if (field !== '' || row.length) { row.push(field); rows.push(row); }
+  const head = (rows.shift() || []).map(h => h.replace(/^﻿/, '').trim());
+  return rows.filter(r => r.length > 1).map(r => Object.fromEntries(head.map((h, i) => [h, (r[i] || '').trim()])));
 }
 
 /** Metres between two lat/lon points (equirectangular is plenty at this scale). */
@@ -526,11 +716,13 @@ const CATEGORIES = {
       { id: 'va', name: 'Veterans Health Administration facilities', url: 'https://www.va.gov/find-locations/', fn: vaFacilities },
       { id: 'hrsa', name: 'HRSA health center service delivery sites', url: 'https://data.hrsa.gov/data/download', fn: hrsaHealthCenters },
       { id: 'cms-clinic', name: 'CMS Provider of Services: FQHCs, rural health clinics & surgery centers', url: 'https://data.hrsa.gov/data/download', fn: cmsClinics },
+      { id: 'doh-lhj', name: 'WA DOH local health jurisdiction clinics', url: 'https://geo.wa.gov/', fn: dohClinics },
       OSM_SRC('health')
     ]
   },
   pharmacy: { radius: 60, classRadius: { x: 30 }, sources: [
-    { id: 'nppes', name: 'CMS NPPES NPI registry: community pharmacies (Census-geocoded)', url: 'https://npiregistry.cms.hhs.gov/', fn: nppesPharmacies },
+    { id: 'doh-helms', name: 'WA DOH licensed pharmacies (HELMS)', url: 'https://doh.wa.gov/licenses-permits-and-certificates/facilities-z/pharmacies', fn: helmsPharmacies },
+    { id: 'nppes', name: 'CMS NPPES NPI registry: community pharmacies (Census-geocoded)', url: 'https://npiregistry.cms.hhs.gov/', fn: nppesPharmacies, fallbackOnly: true },
     OSM_SRC('pharmacy')] },
   grocery: { radius: 60,
     classOf: r => /convenience/i.test(r.kind) ? 'conv' : /farmers/i.test(r.kind) ? 'farm' : 'grocery',
@@ -545,14 +737,20 @@ const CATEGORIES = {
     classRadius: { bank: 40, cu: 40 },
     sources: [
       { id: 'fdic', name: 'FDIC BankFind branch locations', url: 'https://banks.data.fdic.gov/bankfind-suite/', fn: fdicBranches },
-      { ...OSM_SRC('banks'), name: 'OpenStreetMap (includes credit unions)' }] },
+      { id: 'ncua', name: 'NCUA credit union branches (Census-geocoded)', url: 'https://ncua.gov/analysis/credit-union-corporate-call-report-data/quarterly-data', fn: ncuaBranches },
+      { ...OSM_SRC('banks'), name: 'OpenStreetMap (banks & credit unions)' }] },
   fuel: { radius: 40,
     classOf: r => /EV/i.test(r.kind) ? 'ev' : 'fuel',
     classRadius: { ev: 30, fuel: 40 },
     sources: [
       { id: 'afdc', name: 'NREL Alternative Fuels Data Center (public stations)', url: 'https://afdc.energy.gov/stations', fn: afdcStations },
       OSM_SRC('fuel')] },
-  parks: { radius: 60, sources: [OSM_SRC('parks')] }
+  // Park centroids from different sources can sit far apart for big parks,
+  // so same-name matches use a wide radius; unnamed ones only a tight one.
+  parks: { radius: 500, classOf: r => (/playground/i.test(r.kind) ? 'play' : 'park'), classRadius: { park: 60, play: 25 }, sources: [
+    { id: 'state-parks', name: 'Washington State Parks', url: 'https://parks.wa.gov/find-parks', fn: stateParks },
+    { id: 'padus', name: 'USGS PAD-US public parks & recreation areas', url: 'https://www.usgs.gov/programs/gap-analysis-project/science/pad-us-data-overview', fn: padusParks },
+    OSM_SRC('parks')] }
 };
 
 const trimRow = r => { while (r.length && r[r.length - 1] == null) r.pop(); return r; };
