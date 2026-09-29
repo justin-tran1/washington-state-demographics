@@ -50,17 +50,21 @@ async function level(name, vintage) {
       const paged = !!(linfo.advancedQueryCapabilities && linfo.advancedQueryCapabilities.supportsPagination);
       const features = [];
       for (let offset = 0; ; offset += L.page) {
+        // Field names differ between the generalized and detailed services
+        // (AREALAND vs ALAND, BASENAME...), so ask for everything and pick.
         const data = await fetchJSON(`${url}/query?${qs({
-          where: `STATE='${WA_FIPS}'`, outFields: 'GEOID,NAME,AREALAND', returnGeometry: true, outSR: 4326,
+          where: `STATE='${WA_FIPS}'`, outFields: '*', returnGeometry: true, outSR: 4326,
           maxAllowableOffset: L.offset, geometryPrecision: 5,
-          ...(paged ? { orderByFields: 'GEOID', resultRecordCount: L.page, resultOffset: offset } : {}), f: 'json'
+          ...(paged ? { resultRecordCount: L.page, resultOffset: offset } : {}), f: 'json'
         })}`, {}, { retries: 3, timeoutMs: 180000 });
         if (data.error) throw new Error(JSON.stringify(data.error).slice(0, 200));
         for (const f of data.features || []) {
           const geometry = toGeoJSON(f.geometry || {});
           if (!geometry) continue;
           const a = f.attributes;
-          features.push({ type: 'Feature', properties: { GEOID: a.GEOID, NAME: a.NAME, AREALAND: a.AREALAND }, geometry });
+          const geoid = a.GEOID || a.GEOID20 || a.GEOID10;
+          if (!geoid) continue;
+          features.push({ type: 'Feature', properties: { GEOID: geoid, NAME: a.NAME || a.BASENAME, AREALAND: a.AREALAND != null ? a.AREALAND : a.ALAND }, geometry });
         }
         if (!paged) { if (data.exceededTransferLimit) throw new Error('transfer limit hit without pagination'); break; }
         if (!(data.features || []).length || (!data.exceededTransferLimit && data.features.length < L.page)) break;
