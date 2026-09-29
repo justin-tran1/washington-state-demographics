@@ -270,7 +270,10 @@ async function vaFacilities() {
     const a = f.attributes;
     if (+a.VHA_MOBILE === 1 || /^y/i.test(String(a.VHA_SUSPENDED || ''))) continue;
     const p = pt(f); if (!p) continue;
-    const kind = +a.VHA_VAH === 1 ? 'VA hospital (medical center)' : +a.VHA_VCTR2 === 1 ? 'Vet Center (counseling)' : 'VA clinic';
+    // VHA_VAH is not set for every medical center, so the name decides too
+    // ("... VA Medical Center", not "... Medical Center-Vancouver" campuses).
+    const kind = +a.VHA_VAH === 1 || /medical center$/i.test(a.VHA_STA_NAME || '') ? 'VA hospital (medical center)'
+      : +a.VHA_VCTR2 === 1 ? 'Vet Center (counseling)' : 'VA clinic';
     // ADD1 is sometimes the site name, then ADD2 carries the street.
     const street = /^\d/.test(a.VHA_S_ADD1 || '') ? a.VHA_S_ADD1 : (a.VHA_S_ADD2 || a.VHA_S_ADD1);
     rows.push({ ...p, name: a.VHA_STA_NAME, kind, addr: joinAddr(street, a.VHA_S_CITY), web: 'https://www.va.gov/find-locations/' });
@@ -440,22 +443,22 @@ async function helmsPharmacies() {
   const list = (types.features || []).map(f => `${f.attributes.Regulatory_Authorization_Type__Name}=${f.attributes.n}`);
   log(`HELMS licence types: ${list.join(' | ')}`);
   const wanted = (types.features || []).map(f => f.attributes.Regulatory_Authorization_Type__Name)
-    .filter(t => /pharmac/i.test(t || '') && !/nuclear|wholesal|manufactur|non-?resident|drug other|shopkeeper|research/i.test(t));
+    // In-hospital (inpatient) pharmacies do not serve the public.
+    .filter(t => /pharmac/i.test(t || '') && !/hospital|nuclear|wholesal|manufactur|non-?resident|drug other|shopkeeper|research/i.test(t));
   if (!wanted.length) throw new Error('HELMS extract has no pharmacy licence types');
   const { features } = await arcgisAll(url, {
     where: `Regulatory_Authorization_Type__Name IN (${wanted.map(t => `'${t.replace(/'/g, "''")}'`).join(',')})`,
     outFields: 'Account_Name,Organization_Owner__Account_Name,Regulatory_Authorization_Type__Name,Physical_Address,Mailing_Address,Website,Expiration_Date'
   });
-  const now = Date.now();
+  // The layer is a point-in-time extract of active licences. Its expiration
+  // dates predate later renewals, so they are not used to drop records.
   const rows = [];
-  log(`HELMS pharmacy records: ${features.length}, with a point: ${features.filter(f => pt(f)).length}, unexpired: ${features.filter(f => !f.attributes.Expiration_Date || f.attributes.Expiration_Date >= now - 90 * 86400000).length}`);
   for (const f of features) {
     const a = f.attributes;
-    if (a.Expiration_Date && a.Expiration_Date < now - 90 * 86400000) continue; // lapsed licence
     const p = pt(f); if (!p) continue;
     const addr = String(a.Physical_Address || a.Mailing_Address || '').replace(/,?\s*United States$/i, '').replace(/,\s*Washington\s+\d{5}(-\d{4})?$/i, '');
-    rows.push({ ...p, name: titleCase(a.Account_Name || a.Organization_Owner__Account_Name), kind: /hospital|institution/i.test(a.Regulatory_Authorization_Type__Name) ? 'Hospital pharmacy' : 'Pharmacy',
-      addr: addr || null, info: a.Regulatory_Authorization_Type__Name, web: /^https?:\/\//i.test(a.Website || '') ? a.Website : null });
+    rows.push({ ...p, name: titleCase(a.Account_Name || a.Organization_Owner__Account_Name), kind: 'Pharmacy',
+      addr: addr || null, info: 'Licensed by the WA Pharmacy Commission', web: /^https?:\/\//i.test(a.Website || '') ? a.Website : null });
   }
   if (rows.length < 400) throw new Error(`only ${rows.length} licensed pharmacies in HELMS (${wanted.join(', ')})`);
   return rows;
@@ -769,7 +772,7 @@ const CATEGORIES = {
       OSM_SRC('health')
     ]
   },
-  pharmacy: { radius: 60, classRadius: { x: 30 }, sources: [
+  pharmacy: { radius: 60, classRadius: { x: 45 }, sources: [
     { id: 'doh-helms', name: 'WA DOH licensed pharmacies (HELMS)', url: 'https://doh.wa.gov/licenses-permits-and-certificates/facilities-z/pharmacies', fn: helmsPharmacies },
     { id: 'nppes', name: 'CMS NPPES NPI registry: community pharmacies (Census-geocoded)', url: 'https://npiregistry.cms.hhs.gov/', fn: nppesPharmacies, fallbackOnly: true },
     OSM_SRC('pharmacy')] },

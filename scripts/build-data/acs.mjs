@@ -11,7 +11,7 @@
 
 import { createInterface } from 'node:readline';
 import { Readable } from 'node:stream';
-import { fetchRetry, fetchJSON, fetchText, qs, log, round, writeJSON, WA_FIPS } from './lib.mjs';
+import { fetchRetry, fetchJSON, fetchText, qs, log, round, writeJSON, WA_FIPS, unzipText, parseGazetteer } from './lib.mjs';
 
 const SF_BASE = y => `https://www2.census.gov/programs-surveys/acs/summary_file/${y}/table-based-SF/data/5YRData`;
 const META = (y, t) => `https://api.census.gov/data/${y}/acs/acs5/groups/${t}.json`; // keyless
@@ -155,14 +155,7 @@ async function gazetteer(gy) {
   if (!countyFile || !tractFile) throw new Error(`county/tract files not listed (saw: ${files.slice(0, 12).join(', ')})`);
   log(`Gazetteer ${gy}: using ${countyFile}, ${tractFile}`);
   const load = async name => (/\.zip$/i.test(name) ? unzipText(dir + name) : fetchText(dir + name));
-  const parse = text => {
-    const lines = text.split(/\r?\n/).filter(Boolean);
-    const head = lines[0].split('\t').map(h => h.trim());
-    return lines.slice(1).map(l => {
-      const c = l.split('\t');
-      return Object.fromEntries(head.map((h, i) => [h, (c[i] || '').trim()]));
-    });
-  };
+  const parse = parseGazetteer;
   const out = { county: {}, tract: {} };
   for (const r of parse(await load(countyFile))) {
     if (!r.GEOID || !r.GEOID.startsWith(WA_FIPS)) continue;
@@ -179,16 +172,6 @@ async function gazetteer(gy) {
 }
 
 /** Download a zip and return the text of its single .txt member (runner has unzip). */
-async function unzipText(url) {
-  const { execFileSync } = await import('node:child_process');
-  const { writeFile, mkdtemp } = await import('node:fs/promises');
-  const { tmpdir } = await import('node:os');
-  const res = await fetchRetry(url);
-  if (!res.ok) throw new Error(`HTTP ${res.status} for ${url}`);
-  const d = await mkdtemp(`${tmpdir()}/gaz-`);
-  await writeFile(`${d}/f.zip`, Buffer.from(await res.arrayBuffer()));
-  return execFileSync('unzip', ['-p', `${d}/f.zip`], { maxBuffer: 1 << 30 }).toString('latin1');
-}
 
 /** Fallback: land area + internal point from TIGERweb, choosing whichever
  *  field names the layer actually exposes and logging the full error. */

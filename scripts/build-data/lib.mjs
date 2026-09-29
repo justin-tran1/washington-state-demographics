@@ -150,6 +150,33 @@ export async function geocodeBatch(rows, { chunk = 2500 } = {}) {
   return out;
 }
 
+/** Download a ZIP and return the text of its entries (or of one named entry). */
+export async function unzipText(url, entry) {
+  const { execFileSync } = await import('node:child_process');
+  const { writeFile, mkdtemp } = await import('node:fs/promises');
+  const { tmpdir } = await import('node:os');
+  const res = await fetchRetry(url, {}, { retries: 2, timeoutMs: 300000 });
+  if (!res.ok) throw new Error(`HTTP ${res.status} for ${url}`);
+  const d = await mkdtemp(`${tmpdir()}/zip-`);
+  await writeFile(`${d}/f.zip`, Buffer.from(await res.arrayBuffer()));
+  return execFileSync('unzip', ['-p', `${d}/f.zip`, ...(entry ? [entry] : [])], { maxBuffer: 1 << 30 }).toString('latin1');
+}
+
+/**
+ * Parse a Census Gazetteer file into objects keyed by upper-cased header.
+ * The files were tab-delimited through 2024 and are pipe-delimited since 2025.
+ */
+export function parseGazetteer(text) {
+  const lines = String(text).split(/\r?\n/).filter(Boolean);
+  if (!lines.length) return [];
+  const delim = lines[0].includes('|') ? '|' : '\t';
+  const head = lines[0].split(delim).map(h => h.replace(/^\uFEFF/, '').trim().toUpperCase());
+  return lines.slice(1).map(l => {
+    const c = l.split(delim);
+    return Object.fromEntries(head.map((h, i) => [h, (c[i] || '').trim()]));
+  });
+}
+
 /** Statewide Overpass area clause for Washington. */
 export const WA_AREA = 'area["ISO3166-2"="US-WA"][admin_level=4]->.wa;';
 

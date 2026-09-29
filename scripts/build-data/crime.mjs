@@ -11,7 +11,7 @@
 //    Office, Auburn PD), geocoded with the Census batch geocoder. Feeds that
 //    do publish coordinates are queried live by the browser instead.
 
-import { fetchJSON, fetchText, readJSON, writeJSON, log, round, inWA, geocodeBatch, qs, socrataAll } from './lib.mjs';
+import { fetchJSON, fetchText, readJSON, writeJSON, log, round, inWA, geocodeBatch, qs, socrataAll, unzipText, parseGazetteer } from './lib.mjs';
 
 const WASPC_DATASET = 'https://data.wa.gov/resource/vvfu-ry7f.json';
 const WASPC_PAGE = 'https://data.wa.gov/Public-Safety/Washington-State-Uniform-Crime-Reporting-National-/vvfu-ry7f';
@@ -45,8 +45,7 @@ const SPECIAL_PLACES = [
   [/^university of washington/i, 'Seattle'], [/^wsu vancouver/i, 'Vancouver'], [/^washington state university/i, 'Pullman'],
   [/^central washington university/i, 'Ellensburg'], [/^eastern washington university/i, 'Cheney'],
   [/^western washington university/i, 'Bellingham'], [/^evergreen state college/i, 'Olympia'], [/^port of seattle/i, 'SeaTac'],
-  [/^muckleshoot/i, 'Muckleshoot'], [/^tulalip/i, 'Tulalip Bay'], [/^swinomish/i, 'Swinomish Village'],
-  [/^chehalis tribal/i, 'Chehalis Village'], [/^spokane tribal/i, 'Wellpinit'], [/^snohomish auto theft/i, 'Everett']
+  [/^snohomish auto theft/i, 'Everett']
 ];
 
 /** Census place internal points for Washington, newest Gazetteer vintage. */
@@ -55,24 +54,33 @@ async function waPlaces() {
   for (let y = now; y >= now - 4; y--) {
     try {
       const text = await fetchText(`https://www2.census.gov/geo/docs/maps-data/data/gazetteer/${y}_Gazetteer/${y}_gaz_place_53.txt`, {}, { retries: 1, timeoutMs: 60000 });
-      const lines = text.split(/\r?\n/).filter(Boolean);
-      const head = lines.shift().split('\t').map(h => h.replace(/^\uFEFF/, '').trim().toUpperCase());
-      const col = n => head.indexOf(n);
+      const rows = parseGazetteer(text);
       // A missing vintage can come back as an HTML page with status 200.
-      if (col('NAME') < 0 || col('INTPTLAT') < 0 || col('INTPTLONG') < 0) throw new Error(`unexpected header: ${head.slice(0, 6).join(',')}`);
+      if (!rows.length || !('NAME' in rows[0]) || !('INTPTLAT' in rows[0])) throw new Error('not a Gazetteer place file');
       const places = [];
-      for (const line of lines) {
-        const c = line.split('\t').map(v => v.trim());
-        const name = c[col('NAME')];
-        if (!name) continue;
-        const lsad = c[col('LSAD')];
-        const base = name.replace(/ (city|town|CDP|village)$/i, '');
-        places.push({ name, base, k: key(base), incorporated: lsad !== '57', lat: +c[col('INTPTLAT')], lon: +c[col('INTPTLONG')] });
+      for (const r of rows) {
+        if (!r.NAME) continue;
+        const base = r.NAME.replace(/ (city|town|CDP|village)$/i, '');
+        places.push({ name: r.NAME, base, k: key(base), incorporated: r.LSAD !== '57', lat: +r.INTPTLAT, lon: +r.INTPTLONG });
       }
       if (places.length > 500) { log(`gazetteer ${y}: ${places.length} WA places`); return { year: y, places }; }
     } catch (err) { log(`gazetteer ${y}: ${err.message}`); }
   }
   throw new Error('no Census place gazetteer found');
+}
+
+/** Census American Indian / Alaska Native areas in Washington (reservations and trust land). */
+async function waTribalAreas(year) {
+  const dir = `https://www2.census.gov/geo/docs/maps-data/data/gazetteer/${year}_Gazetteer/`;
+  try {
+    const listing = await fetchText(dir, {}, { retries: 1 });
+    const file = [...listing.matchAll(/href="([^"]+)"/g)].map(m => m[1]).find(n => /gaz_aiannh_national\.(txt|zip)$/i.test(n));
+    if (!file) return [];
+    const text = /\.zip$/i.test(file) ? await unzipText(dir + file) : await fetchText(dir + file);
+    return parseGazetteer(text)
+      .map(r => ({ name: r.NAME, k: key(r.NAME), lat: +r.INTPTLAT, lon: +r.INTPTLONG }))
+      .filter(a => a.name && inWA(a.lat, a.lon));
+  } catch (err) { log(`AIANNH gazetteer ${year}: ${err.message}`); return []; }
 }
 
 /** FBI CDE agency roster (keyless web-app backend, then the keyed API). */
@@ -97,7 +105,8 @@ async function buildAgencies(outDir) {
   if (cur.length < 150) throw new Error(`only ${cur.length} WASPC rows for ${year}`);
   const prevTotal = new Map(prev.map(r => [`${r.county}|${r.location}`, +r.total]));
 
-  const { places } = await waPlaces();
+  const { year: gazYear, places } = await waPlaces();
+  const tribal = await waTribalAreas(gazYear);
   const placeByKey = new Map();
   for (const p of places) if (!placeByKey.has(p.k) || p.incorporated) placeByKey.set(p.k, p);
   const findPlace = base => {
@@ -146,6 +155,12 @@ async function buildAgencies(outDir) {
       // "Moxee City Police Department" serves the place named "Moxee".
       const p = findPlace(city[1]) || findPlace(city[1].replace(/\s+city$/i, ''));
       if (p) { type = 'city'; pt = { lat: p.lat, lon: p.lon }; where = 'place'; }
+    }
+    if (!pt && /tribal|tribe|nation/i.test(r.location)) {
+      // Tribal police: the reservation named by the agency's first word.
+      const first = key(r.location.split(/\s+/)[0]);
+      const area = first.length >= 4 && tribal.find(a => a.k.startsWith(first));
+      if (area) { pt = { lat: area.lat, lon: area.lon }; where = 'reservation'; }
     }
     if (!pt) {
       const special = SPECIAL_PLACES.find(([re]) => re.test(r.location));
