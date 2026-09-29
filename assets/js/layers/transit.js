@@ -97,7 +97,10 @@
       source: null, // 'wsdot' | 'osm'
       wsdot: null, wsdotPromise: null, // {routesUrl, stopsUrl, routeFields, stopFields}
       ferriesLoaded: false,
-      lastRoutesKey: null, lastStopsKey: null
+      lastRoutesKey: null, lastStopsKey: null,
+      // Bumped for every new request: a slower, older response must not
+      // overwrite the routes or stops of the view the user has moved to.
+      routesGen: 0, stopsGen: 0
     };
 
     // ---- panel UI -------------------------------------------------------
@@ -226,16 +229,17 @@
       routesLayer.addLayer(gj);
     }
 
-    async function fetchRoutesWSDOT(bounds, zoom) {
+    async function fetchRoutesWSDOT(bounds, zoom, gen) {
       const w = await resolveWSDOT();
       const offset = zoom < 10 ? 0.001 : zoom < 12 ? 0.0003 : 0.00005;
       const fc = await U.arcgis.query(w.routesUrl, Object.assign({
         outFields: '*', geometryPrecision: 5, maxAllowableOffset: offset
       }, U.arcgis.envelope(bounds)), { pageSize: 2000, maxFeatures: 8000 });
+      if (gen !== state.routesGen) return 0;
       addRouteFeatures(fc.features, w.routeFields);
       return fc.features.length;
     }
-    async function fetchRoutesOSM(bounds) {
+    async function fetchRoutesOSM(bounds, gen) {
       const bbox = U.overpass.bbox(bounds);
       const ql = `[out:json][timeout:${CFG.OVERPASS.timeoutS}];` +
         `relation["type"="route"]["route"~"^(bus|trolleybus|light_rail|subway|train|tram|ferry|monorail)$"](${bbox});` +
@@ -259,6 +263,7 @@
             : { type: 'MultiLineString', coordinates: lines }
         });
       }
+      if (gen !== state.routesGen) return 0;
       addRouteFeatures(features, null);
       return features.length;
     }
@@ -271,12 +276,13 @@
         iconSize: [12, 12], iconAnchor: [6, 6], popupAnchor: [0, -6]
       });
     }
-    async function fetchStopsWSDOT(bounds) {
+    async function fetchStopsWSDOT(bounds, gen) {
       const w = await resolveWSDOT();
       if (!w.stopsUrl) throw new Error('no stop layer');
       const fc = await U.arcgis.query(w.stopsUrl, Object.assign({
         outFields: '*', geometryPrecision: 6
       }, U.arcgis.envelope(bounds)), { pageSize: 2000, maxFeatures: 5000 });
+      if (gen !== state.stopsGen) return 0;
       stopsCluster.clearLayers();
       const markers = [];
       for (const f of fc.features) {
@@ -296,13 +302,14 @@
       stopsCluster.addLayers(markers);
       return markers.length;
     }
-    async function fetchStopsOSM(bounds) {
+    async function fetchStopsOSM(bounds, gen) {
       const bbox = U.overpass.bbox(bounds);
       const ql = `[out:json][timeout:${CFG.OVERPASS.timeoutS}];(` +
         `node["highway"="bus_stop"](${bbox});` +
         `node["railway"~"^(station|halt|tram_stop)$"](${bbox});` +
         `node["amenity"="ferry_terminal"](${bbox}););out 4000;`;
       const data = await U.overpass.run(ql);
+      if (gen !== state.stopsGen) return 0;
       stopsCluster.clearLayers();
       const markers = [];
       for (const elm of (data.elements || [])) {
@@ -355,18 +362,19 @@
       let note = '';
 
       if (state.showRoutes) {
-        if (zoom < CFG.TRANSIT.routesMinZoom) { routesLayer.clearLayers(); state.lastRoutesKey = null; note = 'Zoom in for routes (z' + CFG.TRANSIT.routesMinZoom + '+). '; }
+        if (zoom < CFG.TRANSIT.routesMinZoom) { state.routesGen++; routesLayer.clearLayers(); state.lastRoutesKey = null; note = 'Zoom in for routes (z' + CFG.TRANSIT.routesMinZoom + '+). '; }
         else {
           const key = boundsKey(bounds, 'r' + (zoom < 10 ? 'a' : zoom < 12 ? 'b' : 'c'));
           if (force || key !== state.lastRoutesKey) {
             state.lastRoutesKey = key;
+            const gen = ++state.routesGen;
             jobs.push((async () => {
               try {
-                const n = await fetchRoutesWSDOT(bounds, zoom);
+                const n = await fetchRoutesWSDOT(bounds, zoom, gen);
                 state.source = 'wsdot';
                 return 'routes:' + n;
               } catch (e) {
-                const n = await fetchRoutesOSM(bounds);
+                const n = await fetchRoutesOSM(bounds, gen);
                 state.source = 'osm';
                 return 'routes:' + n;
               }
@@ -375,14 +383,15 @@
         }
       }
       if (state.showStops) {
-        if (zoom < CFG.TRANSIT.stopsMinZoom) { stopsCluster.clearLayers(); state.lastStopsKey = null; }
+        if (zoom < CFG.TRANSIT.stopsMinZoom) { state.stopsGen++; stopsCluster.clearLayers(); state.lastStopsKey = null; }
         else {
           const key = boundsKey(bounds, 's');
           if (force || key !== state.lastStopsKey) {
             state.lastStopsKey = key;
+            const gen = ++state.stopsGen;
             jobs.push((async () => {
-              try { return 'stops:' + await fetchStopsWSDOT(bounds); }
-              catch (e) { return 'stops:' + await fetchStopsOSM(bounds); }
+              try { return 'stops:' + await fetchStopsWSDOT(bounds, gen); }
+              catch (e) { return 'stops:' + await fetchStopsOSM(bounds, gen); }
             })());
           }
         }
