@@ -66,14 +66,25 @@ export async function arcgisAll(layerUrl, params = {}, { max = 200000 } = {}) {
   const info = await fetchJSON(`${layerUrl}?f=json`);
   if (info.error) throw new Error(`ArcGIS layer: ${info.error.message}`);
   const page = Math.min(info.maxRecordCount || 1000, 2000);
+  // A server without pagination ignores resultOffset and would hand back
+  // its first page forever.
+  const paged = !(info.advancedQueryCapabilities && info.advancedQueryCapabilities.supportsPagination === false);
   const out = [];
-  let offset = 0;
+  let offset = 0, prevFirst = null;
   for (;;) {
     const p = { where: '1=1', outFields: '*', returnGeometry: true, outSR: 4326, f: 'json',
-      resultRecordCount: page, resultOffset: offset, ...params };
+      ...(paged ? { resultRecordCount: page, resultOffset: offset } : {}), ...params };
     const data = await fetchJSON(`${layerUrl}/query?${qs(p)}`);
     if (data.error) throw new Error(`ArcGIS query: ${data.error.message}`);
     const feats = data.features || [];
+    if (!paged) {
+      if (data.exceededTransferLimit) throw new Error(`${layerUrl}: more than ${feats.length} features and no pagination`);
+      out.push(...feats);
+      break;
+    }
+    const first = feats.length ? JSON.stringify(feats[0]) : null;
+    if (first && first === prevFirst) throw new Error(`${layerUrl}: the server returned the same page twice (resultOffset ignored)`);
+    prevFirst = first;
     out.push(...feats);
     if (!feats.length || out.length >= max || (!data.exceededTransferLimit && feats.length < page)) break;
     offset += feats.length;
@@ -109,7 +120,11 @@ export async function overpass(ql, { timeoutMs = 300000 } = {}) {
         }, { retries: 0, timeoutMs });
         const text = await res.text();
         if (!res.ok) throw new Error(`HTTP ${res.status}: ${text.slice(0, 160)}`);
-        return JSON.parse(text);
+        const data = JSON.parse(text);
+        // A timeout or memory limit hit while printing is reported as HTTP 200
+        // with a "remark" and a partial element list: that is a failure.
+        if (data.remark && /runtime error|timed? ?out|out of memory|too many/i.test(data.remark)) throw new Error(`Overpass: ${data.remark.slice(0, 200)}`);
+        return data;
       } catch (err) {
         lastErr = err;
         await sleep(15000 * (attempt + 1)); // Overpass asks clients to back off
@@ -175,6 +190,50 @@ export function parseGazetteer(text) {
     const c = l.split(delim);
     return Object.fromEntries(head.map((h, i) => [h, (c[i] || '').trim()]));
   });
+}
+
+/** Census places (cities, towns, CDPs) in Washington, newest Gazetteer vintage. Cached. */
+let placesPromise = null;
+export function waPlaces() {
+  if (!placesPromise) placesPromise = loadPlaces().catch(err => { placesPromise = null; throw err; });
+  return placesPromise;
+}
+async function loadPlaces() {
+  const now = new Date().getUTCFullYear();
+  for (let y = now; y >= now - 4; y--) {
+    try {
+      const text = await fetchText(`https://www2.census.gov/geo/docs/maps-data/data/gazetteer/${y}_Gazetteer/${y}_gaz_place_53.txt`, {}, { retries: 1, timeoutMs: 60000 });
+      const rows = parseGazetteer(text);
+      // A missing vintage can come back as an HTML page with status 200.
+      if (!rows.length || !('NAME' in rows[0]) || !('INTPTLAT' in rows[0])) throw new Error('not a Gazetteer place file');
+      const places = [];
+      for (const r of rows) {
+        if (!r.NAME) continue;
+        const base = r.NAME.replace(/ (city|town|CDP|village)$/i, '');
+        places.push({ name: r.NAME, base, incorporated: r.LSAD !== '57', lat: +r.INTPTLAT, lon: +r.INTPTLONG });
+      }
+      if (places.length > 500) { log(`gazetteer ${y}: ${places.length} WA places`); return { year: y, places }; }
+    } catch (err) { log(`gazetteer ${y}: ${err.message}`); }
+  }
+  throw new Error('no Census place gazetteer found');
+}
+
+const PT_OFFSET = new Intl.DateTimeFormat('en-US', { timeZone: 'America/Los_Angeles', timeZoneName: 'shortOffset' });
+/** Hours behind UTC in Washington at instant t (7 in summer, 8 in winter). */
+const pacificOffset = t => -parseInt(PT_OFFSET.formatToParts(new Date(t)).find(x => x.type === 'timeZoneName').value.replace('GMT', '') || '0', 10);
+/**
+ * Epoch ms for a timestamp without a UTC offset (Socrata "floating" times),
+ * read as Washington wall-clock time with the daylight-saving rule of that
+ * date. Timestamps that carry an offset are parsed as they are.
+ */
+export function parsePacific(s) {
+  const str = String(s || '').trim();
+  if (/(z|[+-]\d\d:?\d\d)$/i.test(str)) return Date.parse(str);
+  const m = str.match(/^(\d{4})-(\d\d)-(\d\d)(?:[T ](\d\d):(\d\d)(?::(\d\d))?)?/);
+  if (!m) return NaN;
+  const wall = Date.UTC(+m[1], +m[2] - 1, +m[3], +(m[4] || 0), +(m[5] || 0), +(m[6] || 0));
+  for (const h of [7, 8]) if (pacificOffset(wall + h * 3600000) === h) return wall + h * 3600000;
+  return wall + 8 * 3600000; // the skipped spring-forward hour
 }
 
 /** Statewide Overpass area clause for Washington. */
