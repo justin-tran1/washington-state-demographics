@@ -214,7 +214,7 @@
 
   // --------------------------------------------------------------- socrata
   async function socrataQuery(domains, dataset, soql, opts = {}) {
-    const pageSize = 5000;
+    const pageSize = 20000; // SODA allows up to 50,000 per request
     const maxRows = opts.maxRows || 25000;
     let lastErr;
     for (const domain of domains) {

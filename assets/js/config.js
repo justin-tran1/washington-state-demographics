@@ -402,7 +402,7 @@
       { id: 365, label: 'Last 12 months' }
     ],
     defaultRange: 90,
-    maxPerCity: 60000,
+    maxPerCity: 80000, // Seattle alone reports ~76k offenses a year
     // Category rules are applied (in order) against UPPERCASED
     // "offense || parent group" text from each source, so one rule set covers
     // every feed. First match wins.
