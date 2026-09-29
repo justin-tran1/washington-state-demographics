@@ -33,7 +33,7 @@ function toGeoJSON(g) {
   return polys.length === 1 ? { type: 'Polygon', coordinates: polys[0] } : { type: 'MultiPolygon', coordinates: polys };
 }
 
-async function level(name, vintage) {
+async function level(name, vintage, min) {
   const L = LEVELS[name];
   let lastErr;
   for (const root of roots(vintage)) {
@@ -49,6 +49,7 @@ async function level(name, vintage) {
       // request must carry everything.
       const paged = !!(linfo.advancedQueryCapabilities && linfo.advancedQueryCapabilities.supportsPagination);
       const features = [];
+      let sampleFields = '';
       for (let offset = 0; ; offset += L.page) {
         // Field names differ between the generalized and detailed services
         // (AREALAND vs ALAND, BASENAME...), so ask for everything and pick.
@@ -58,6 +59,7 @@ async function level(name, vintage) {
           ...(paged ? { resultRecordCount: L.page, resultOffset: offset } : {}), f: 'json'
         })}`, {}, { retries: 3, timeoutMs: 180000 });
         if (data.error) throw new Error(JSON.stringify(data.error).slice(0, 200));
+        if (!sampleFields && data.features && data.features[0]) sampleFields = Object.keys(data.features[0].attributes || {}).join(',');
         for (const f of data.features || []) {
           const geometry = toGeoJSON(f.geometry || {});
           if (!geometry) continue;
@@ -69,6 +71,9 @@ async function level(name, vintage) {
         if (!paged) { if (data.exceededTransferLimit) throw new Error('transfer limit hit without pagination'); break; }
         if (!(data.features || []).length || (!data.exceededTransferLimit && data.features.length < L.page)) break;
       }
+      // An empty or partial answer (e.g. a service without a STATE field)
+      // must fall through to the next service, not replace good boundaries.
+      if (features.length < min) throw new Error(`only ${features.length} ${name} features (fields: ${sampleFields || 'none returned'})`);
       return { root, features };
     } catch (err) { lastErr = err; log(`${name} boundaries from ${root}: ${err.message}`); }
   }
@@ -79,8 +84,7 @@ export async function buildBoundaries(outDir) {
   const now = new Date().getUTCFullYear();
   const summary = {};
   for (const [name, min] of [['county', 39], ['tract', 1500]]) {
-    const { root, features } = await level(name, now - 1);
-    if (features.length < min) throw new Error(`only ${features.length} ${name} boundaries from ${root}`);
+    const { root, features } = await level(name, now - 1, min);
     const bytes = await writeJSON(`${outDir}/geo/${name === 'county' ? 'counties' : 'tracts'}.json`, {
       type: 'FeatureCollection', source: root.split('/').pop(), built: new Date().toISOString(), features
     });
