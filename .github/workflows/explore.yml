@@ -1,0 +1,13 @@
+name: Explore data sources (temporary)
+on:
+  push:
+    paths: ['scripts/explore-sources.sh', '.github/workflows/explore.yml']
+permissions:
+  contents: read
+jobs:
+  explore:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - run: bash scripts/explore-sources.sh
