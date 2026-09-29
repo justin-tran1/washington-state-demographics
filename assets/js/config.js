@@ -227,29 +227,12 @@
   ];
 
   // ---------------------------------------------------------------- census
-  // ACS 5-year estimates. Vintages are tried in order until one responds, so
-  // the app picks up new releases automatically.
+  // ACS 5-year estimates are built at deploy time (scripts/build-data/acs.mjs)
+  // and served same-origin; the newest published vintage is picked up
+  // automatically on the monthly rebuild.
   const CENSUS = {
-    apiBase: 'https://api.census.gov/data',
-    vintages: [2024, 2023, 2022],
     stateFips: '53',
-    // Detailed tables (dataset acs/acs5)
-    detailedVars: [
-      'B01003_001E', // total population
-      'B01002_001E', // median age
-      'B19013_001E', // median household income
-      'B19301_001E', // per-capita income
-      'B25077_001E', // median home value (owner-occupied)
-      'B25064_001E', // median gross rent
-      'B15003_001E', 'B15003_022E', 'B15003_023E', 'B15003_024E', 'B15003_025E', // education 25+
-      'B17001_001E', 'B17001_002E', // poverty universe / below poverty
-      'B23025_003E', 'B23025_005E', // civilian labor force / unemployed
-      'B25003_001E', 'B25003_002E', // occupied units / owner-occupied
-      'B11001_001E'  // households
-    ],
-    // Subject table S2701 (dataset acs/acs5/subject) — health insurance
-    subjectVars: ['S2701_C01_001E', 'S2701_C03_001E', 'S2701_C05_001E'],
-    cacheTtlMs: 30 * 24 * 3600 * 1000
+    prebuilt: { county: 'data/acs/county.json', tract: 'data/acs/tract.json' }
   };
 
   // TIGERweb generalized (cartographic) boundaries, one service per ACS vintage.

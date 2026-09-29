@@ -276,39 +276,12 @@
   };
 
   // ---------------------------------------------------------------- census
-  // Shared ACS store: one statewide pull per geography level, cached.
+  // ACS 5-year estimates, built at deploy time by the build-data GitHub Action
+  // and served same-origin from data/acs/. The browser no longer calls the
+  // Census Data API at all: since 2025 it returns a "Missing Key" HTML page to
+  // every keyless request, which is what broke these layers.
   const censusStore = {
     _mem: {}, vintage: null, _pending: {},
-    derive(row) {
-      const n = k => {
-        const v = row[k] === undefined ? null : Number(row[k]);
-        return (v == null || isNaN(v) || v < 0) ? null : v; // negatives = ACS suppression sentinels
-      };
-      const pop = n('B01003_001E');
-      const edu = n('B15003_001E');
-      const eduHi = ['B15003_022E', 'B15003_023E', 'B15003_024E', 'B15003_025E']
-        .map(n).reduce((a, b) => (a == null || b == null ? null : a + b), 0);
-      const povU = n('B17001_001E'), pov = n('B17001_002E');
-      const lf = n('B23025_003E'), unemp = n('B23025_005E');
-      const occ = n('B25003_001E'), own = n('B25003_002E');
-      const insUniv = n('S2701_C01_001E');
-      let pctIns = n('S2701_C03_001E');
-      let pctUnins = n('S2701_C05_001E');
-      if (pctIns != null && pctUnins != null && Math.abs(pctIns + pctUnins - 100) > 2) pctIns = null;
-      if (pctIns == null && pctUnins != null) pctIns = Math.max(0, 100 - pctUnins);
-      return {
-        name: row.NAME || '',
-        pop, households: n('B11001_001E'),
-        medAge: n('B01002_001E'), medInc: n('B19013_001E'), perCap: n('B19301_001E'),
-        medHome: n('B25077_001E'), medRent: n('B25064_001E'),
-        pctBach: (edu && eduHi != null) ? (100 * eduHi / edu) : null,
-        pctPoverty: (povU && pov != null) ? (100 * pov / povU) : null,
-        pctUnemp: (lf && unemp != null) ? (100 * unemp / lf) : null,
-        pctOwner: (occ && own != null) ? (100 * own / occ) : null,
-        insUniverse: insUniv, pctInsured: pctIns, pctUninsured: pctUnins,
-        aland: null // merged later from boundary attributes
-      };
-    },
     async load(level) { // level: 'county' | 'tract'
       if (this._mem[level]) return this._mem[level];
       if (this._pending[level]) return this._pending[level];
@@ -316,51 +289,24 @@
       return this._pending[level];
     },
     async _load(level) {
-      const C = CFG.CENSUS;
-      const cacheKey = 'acs:' + level;
-      const cached = store.get(cacheKey);
-      if (cached && cached.rows && cached.vintage) {
-        this.vintage = cached.vintage;
-        this._mem[level] = cached;
-        return cached;
+      let data;
+      try {
+        data = await fetchJSON(CFG.CENSUS.prebuilt[level], { timeout: 30000, retries: 1 });
+      } catch (err) {
+        throw new Error('ACS ' + level + ' data file unavailable (' + err.message + ')');
       }
-      const forClause = level === 'tract' ? 'tract:*' : 'county:*';
-      const inClause = level === 'tract' ? `state:${C.stateFips} county:*` : `state:${C.stateFips}`;
-      let lastErr;
-      const vintages = this.vintage ? [this.vintage] : C.vintages;
-      for (const vintage of vintages) {
-        try {
-          const base = `${C.apiBase}/${vintage}/acs/acs5`;
-          const urlDet = `${base}?get=${['NAME'].concat(C.detailedVars).join(',')}&for=${encodeURIComponent(forClause)}&in=${encodeURIComponent(inClause)}`;
-          const urlSub = `${base}/subject?get=${C.subjectVars.join(',')}&for=${encodeURIComponent(forClause)}&in=${encodeURIComponent(inClause)}`;
-          const [det, sub] = await Promise.all([
-            fetchJSON(urlDet, { timeout: 45000 }),
-            fetchJSON(urlSub, { timeout: 45000 })
-          ]);
-          const toMap = table => {
-            const header = table[0];
-            const out = {};
-            for (let i = 1; i < table.length; i++) {
-              const row = {};
-              header.forEach((h, j) => { row[h] = table[i][j]; });
-              const geoid = (row.state || '') + (row.county || '') + (row.tract || '');
-              out[geoid] = row;
-            }
-            return out;
-          };
-          const dm = toMap(det), sm = toMap(sub);
-          const rows = {};
-          for (const [geoid, row] of Object.entries(dm)) {
-            rows[geoid] = this.derive(Object.assign({}, row, sm[geoid] || {}));
-          }
-          const result = { vintage, rows, span: `${vintage - 4}-${vintage}` };
-          this.vintage = vintage;
-          this._mem[level] = result;
-          store.set(cacheKey, result, C.cacheTtlMs);
-          return result;
-        } catch (err) { lastErr = err; }
+      if (!data || !Array.isArray(data.fields) || !data.rows) throw new Error('ACS ' + level + ' data file is malformed');
+      const F = data.fields;
+      const rows = {};
+      for (const [geoid, vals] of Object.entries(data.rows)) {
+        const rec = { name: (data.names && data.names[geoid]) || '' };
+        for (let i = 0; i < F.length; i++) rec[F[i]] = vals[i];
+        rows[geoid] = rec;
       }
-      throw lastErr || new Error('Census API unavailable');
+      const result = { vintage: data.vintage, span: data.span, source: data.source, built: data.built, rows };
+      this.vintage = data.vintage;
+      this._mem[level] = result;
+      return result;
     }
   };
 

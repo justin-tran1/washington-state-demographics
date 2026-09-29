@@ -47,19 +47,25 @@
       return this.tractCache;
     },
 
-    /** Statewide tract centroids + land areas (one light request, reused by
-     *  density binning and the drive-time analytics). */
+    /** Statewide tract internal points + land areas, from the pre-built ACS
+     *  tract file (TIGERweb INTPTLAT/INTPTLON, which are guaranteed to fall
+     *  inside the tract - better than a centroid for point-in-polygon work).
+     *  Used by the drive-time reach statistics. */
     async loadTractIndex() {
       if (this.tractIndex) return this.tractIndex;
-      if (this.tractIndexPromise) return this.tractIndexPromise;
-      const wa = CFG.MAP.waBounds;
-      const bounds = L.latLngBounds([wa.south, wa.west], [wa.north, wa.east]);
-      this.tractIndexPromise = U.tigerweb.tractCentroidsInEnvelope(bounds).then(pts => {
-        this.tractIndex = pts;
-        this.tractIndexById = new Map(pts.map(p => [p.geoid, p]));
-        return pts;
-      });
-      this.tractIndexPromise.catch(() => { this.tractIndexPromise = null; });
+      if (!this.tractIndexPromise) {
+        this.tractIndexPromise = U.censusStore.load('tract').then(acs => {
+          const pts = [];
+          for (const [geoid, r] of Object.entries(acs.rows)) {
+            if (r.lat != null && r.lon != null) pts.push({ geoid, lat: r.lat, lon: r.lon, aland: r.aland });
+          }
+          if (!pts.length) throw new Error('no tract internal points in the ACS data');
+          this.tractIndex = pts;
+          this.tractIndexById = new Map(pts.map(p => [p.geoid, p]));
+          return pts;
+        });
+        this.tractIndexPromise.catch(() => { this.tractIndexPromise = null; });
+      }
       return this.tractIndexPromise;
     },
     alandOf(geoid) {
@@ -133,11 +139,12 @@
     function valueFor(geoid, acs, feature) {
       const row = acs.rows[geoid];
       if (!row) return null;
-      if (state.metric.needsArea) {
+      // Land area ships with the ACS rows; the boundary attribute is only a
+      // fallback (the bundled county outlines carry no AREALAND at all).
+      if (state.metric.needsArea && !(row.aland > 0)) {
         const aland = feature && feature.properties.AREALAND != null
           ? feature.properties.AREALAND : geoStore.alandOf(geoid);
-        if (aland == null) return null;
-        return state.metric.value(Object.assign({}, row, { aland }));
+        return aland > 0 ? state.metric.value(Object.assign({}, row, { aland })) : null;
       }
       return state.metric.value(row);
     }
@@ -145,31 +152,9 @@
     async function computeBreaks(level, acs) {
       const key = level + ':' + state.metric.id + ':' + acs.vintage;
       if (state.breaksCache[key]) return state.breaksCache[key];
-      let values;
-      if (state.metric.needsArea) {
-        if (level === 'county') {
-          const fc = await geoStore.loadCounties();
-          values = fc.features.map(f => {
-            const geoid = f.properties.GEOID;
-            const aland = f.properties.AREALAND;
-            const row = acs.rows[geoid];
-            return (row && aland > 0) ? state.metric.value(Object.assign({}, row, { aland })) : null;
-          });
-        } else {
-          const idx = await geoStore.loadTractIndex().catch(() => null);
-          if (idx) {
-            values = idx.map(p => {
-              const row = acs.rows[p.geoid];
-              return (row && p.aland > 0) ? state.metric.value(Object.assign({}, row, { aland: p.aland })) : null;
-            });
-          } else { // fall back to whatever tracts are cached
-            values = Array.from(geoStore.tractCache.values()).map(f =>
-              valueFor(f.properties.GEOID, acs, f));
-          }
-        }
-      } else {
-        values = Object.values(acs.rows).map(r => state.metric.value(r));
-      }
+      // Every metric, density included, can be binned straight from the
+      // statewide ACS rows, so the legend is stable wherever the view is.
+      const values = Object.values(acs.rows).map(r => state.metric.value(r));
       const q = U.geo.quantileBreaks(values, ramp().length);
       state.breaksCache[key] = q;
       return q;
@@ -196,7 +181,6 @@
           features = fc.features;
         } else {
           await geoStore.loadTractsInView(map);
-          if (state.metric.needsArea) await geoStore.loadTractIndex().catch(() => {});
           features = Array.from(geoStore.tractCache.values());
         }
         if (token !== renderToken || !state.enabled) return;
@@ -263,7 +247,8 @@
     function profileHTML(geoid, feature, acs) {
       const row = acs.rows[geoid] || null;
       const name = (row && row.name ? row.name : (feature.properties.NAME || geoid));
-      const aland = feature.properties.AREALAND != null ? feature.properties.AREALAND : geoStore.alandOf(geoid);
+      const aland = row && row.aland > 0 ? row.aland
+        : (feature.properties.AREALAND != null ? feature.properties.AREALAND : geoStore.alandOf(geoid));
       const withArea = row ? Object.assign({}, row, { aland }) : null;
       const lines = [];
       const push = (label, val) => lines.push(

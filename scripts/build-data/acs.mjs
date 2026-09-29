@@ -11,7 +11,7 @@
 
 import { createInterface } from 'node:readline';
 import { Readable } from 'node:stream';
-import { fetchRetry, fetchJSON, qs, log, round, writeJSON, WA_FIPS } from './lib.mjs';
+import { fetchRetry, fetchJSON, fetchText, qs, log, round, writeJSON, WA_FIPS } from './lib.mjs';
 
 const SF_BASE = y => `https://www2.census.gov/programs-surveys/acs/summary_file/${y}/table-based-SF/data/5YRData`;
 const META = (y, t) => `https://api.census.gov/data/${y}/acs/acs5/groups/${t}.json`; // keyless
@@ -121,7 +121,55 @@ async function readTableAPI(y, table, lines, key) {
   return out;
 }
 
-/** Land area + internal point for every WA county and tract, from TIGERweb. */
+/** Census tract display name from its 6-digit code: 005302 -> "53.02". */
+function tractName(geoid) {
+  const code = geoid.slice(5);
+  const base = parseInt(code.slice(0, 4), 10), suffix = code.slice(4);
+  return `Census Tract ${suffix === '00' ? base : base + '.' + suffix}`;
+}
+
+/**
+ * Land area, internal point and name for every WA county and tract.
+ * Primary source is the Census Gazetteer files (keyless, flat, exactly the
+ * fields needed); TIGERweb is the fallback.
+ */
+async function geoAttributes(y) {
+  for (const gy of [y, y - 1, y - 2]) {
+    try { return await gazetteer(gy); }
+    catch (err) { log(`Gazetteer ${gy} unavailable: ${err.message}`); }
+  }
+  log('falling back to TIGERweb for land area and internal points');
+  return tigerAttributes(y);
+}
+
+async function gazetteer(gy) {
+  const base = `https://www2.census.gov/geo/docs/maps-data/data/gazetteer/${gy}_Gazetteer`;
+  const parse = text => {
+    const lines = text.split(/\r?\n/).filter(Boolean);
+    const head = lines[0].split('\t').map(h => h.trim());
+    return lines.slice(1).map(l => {
+      const c = l.split('\t');
+      return Object.fromEntries(head.map((h, i) => [h, (c[i] || '').trim()]));
+    });
+  };
+  const out = { county: {}, tract: {} };
+  const counties = parse(await fetchText(`${base}/${gy}_Gaz_counties_national.txt`))
+    .filter(r => r.GEOID && r.GEOID.startsWith(WA_FIPS));
+  for (const r of counties) {
+    out.county[r.GEOID] = { name: r.NAME, aland: +r.ALAND, lat: round(+r.INTPTLAT), lon: round(+r.INTPTLONG) };
+  }
+  const tracts = parse(await fetchText(`${base}/${gy}_Gaz_tracts_${WA_FIPS}.txt`));
+  for (const r of tracts) {
+    out.tract[r.GEOID] = { name: tractName(r.GEOID), aland: +r.ALAND, lat: round(+r.INTPTLAT), lon: round(+r.INTPTLONG) };
+  }
+  if (Object.keys(out.county).length !== 39) throw new Error(`expected 39 counties, got ${Object.keys(out.county).length}`);
+  if (Object.keys(out.tract).length < 1500) throw new Error(`only ${Object.keys(out.tract).length} tracts`);
+  log(`Gazetteer ${gy}: ${Object.keys(out.county).length} counties, ${Object.keys(out.tract).length} tracts`);
+  return out;
+}
+
+/** Fallback: land area + internal point from TIGERweb, choosing whichever
+ *  field names the layer actually exposes and logging the full error. */
 async function tigerAttributes(y) {
   const out = { county: {}, tract: {} };
   const svc = { county: 'State_County/MapServer', tract: 'Tracts_Blocks/MapServer' };
@@ -132,18 +180,27 @@ async function tigerAttributes(y) {
     if (!info || info.error) { root = TIGERWEB(y - 1); info = await fetchJSON(`${root}/${svc[level]}?f=json`); }
     const layer = (info.layers || []).find(l => want[level].test(l.name));
     if (!layer) throw new Error(`TIGERweb ${level} layer not found`);
-    const url = `${root}/${svc[level]}/${layer.id}/query`;
+    const layerUrl = `${root}/${svc[level]}/${layer.id}`;
+    const linfo = await fetchJSON(`${layerUrl}?f=json`);
+    const have = new Set((linfo.fields || []).map(f => f.name));
+    const pick = (...c) => c.find(n => have.has(n));
+    const F = { geoid: pick('GEOID'), name: pick('NAME', 'BASENAME'), aland: pick('AREALAND', 'ALAND'),
+      lat: pick('INTPTLAT', 'CENTLAT'), lon: pick('INTPTLON', 'CENTLON') };
+    const outFields = Object.values(F).filter(Boolean).join(',');
+    const paged = !!(linfo.advancedQueryCapabilities && linfo.advancedQueryCapabilities.supportsPagination);
     for (let offset = 0; ; offset += 1000) {
-      const data = await fetchJSON(`${url}?${qs({
-        where: `STATE='${WA_FIPS}'`, outFields: 'GEOID,NAME,AREALAND,INTPTLAT,INTPTLON',
-        returnGeometry: false, f: 'json', resultRecordCount: 1000, resultOffset: offset
-      })}`);
-      if (data.error) throw new Error(`TIGERweb ${level}: ${data.error.message}`);
+      const p = { where: `STATE='${WA_FIPS}'`, outFields, returnGeometry: false, f: 'json' };
+      if (paged) Object.assign(p, { resultRecordCount: 1000, resultOffset: offset });
+      const data = await fetchJSON(`${layerUrl}/query?${qs(p)}`);
+      if (data.error) throw new Error(`TIGERweb ${level}: ${JSON.stringify(data.error)} (fields available: ${[...have].join(',')})`);
       for (const f of data.features || []) {
         const a = f.attributes;
-        out[level][a.GEOID] = { name: a.NAME, aland: a.AREALAND, lat: round(+a.INTPTLAT), lon: round(+a.INTPTLON) };
+        out[level][a[F.geoid]] = {
+          name: level === 'tract' ? tractName(a[F.geoid]) : a[F.name],
+          aland: a[F.aland], lat: round(+a[F.lat]), lon: round(+a[F.lon])
+        };
       }
-      if (!(data.features || []).length || (!data.exceededTransferLimit && data.features.length < 1000)) break;
+      if (!paged || !(data.features || []).length || (!data.exceededTransferLimit && data.features.length < 1000)) break;
     }
     log(`TIGERweb ${level}: ${Object.keys(out[level]).length} features`);
   }
@@ -170,7 +227,7 @@ export async function buildACS(outDir) {
     }
   });
   await Promise.all(workers);
-  const tiger = await tigerAttributes(y);
+  const tiger = await geoAttributes(y);
 
   const summary = {};
   for (const level of ['county', 'tract']) {
@@ -202,7 +259,14 @@ export async function buildACS(outDir) {
       };
       rows[g] = FIELDS.map(f => rec[f]);
     }
-    const names = Object.fromEntries(geoids.map(g => [g, (tiger[level][g] || {}).name || null]));
+    // Tract names read "Census Tract 1.01, King County"; counties "King County".
+    const nameOf = g => {
+      const own = (tiger[level][g] || {}).name || null;
+      if (level !== 'tract') return own;
+      const county = (tiger.county[g.slice(0, 5)] || {}).name;
+      return own && county ? `${own}, ${county}` : own;
+    };
+    const names = Object.fromEntries(geoids.map(g => [g, nameOf(g)]));
     const bytes = await writeJSON(`${outDir}/acs/${level}.json`, {
       vintage: y, span: `${y - 4}-${y}`, level,
       source: key ? 'U.S. Census Bureau, ACS 5-Year, Census Data API'
