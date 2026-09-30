@@ -18,7 +18,7 @@
 import { execFileSync } from 'node:child_process';
 import { mkdtemp, writeFile, readFile, readdir } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { fetchJSON, fetchRetry, qs, log, writeJSON, WA_FIPS } from './lib.mjs';
+import { fetchJSON, fetchRetry, qs, log, writeJSON, readJSON, WA_FIPS } from './lib.mjs';
 
 const BASE = 'https://tigerweb.geo.census.gov/arcgis/rest/services';
 const roots = y => [`${BASE}/Generalized_ACS${y}`, `${BASE}/Generalized_ACS${y - 1}`, `${BASE}/Generalized_ACS${y - 2}`, `${BASE}/TIGERweb`];
@@ -211,15 +211,21 @@ export async function buildBoundaries(outDir) {
   const now = new Date().getUTCFullYear();
   const summary = {};
   for (const [name, min] of [['county', 39], ['tract', 1500]]) {
+    const file = `${outDir}/geo/${name === 'county' ? 'counties' : 'tracts'}.json`;
     let got;
     try { got = await cartographic(name, now - 1, min); }
     catch (err) {
       const { root, features } = await level(name, now - 1, min);
       got = { source: root.split('/').pop(), features };
-      // Detailed TIGERweb polygons are legal boundaries that include water.
-      if (!/Generalized/.test(root)) { got.includesWater = true; log(`WARNING: ${name} boundaries include water areas (detailed TIGERweb)`); }
+      // Detailed TIGERweb polygons are legal boundaries that include water:
+      // never let them replace a published file, only fill a missing one.
+      if (!/Generalized/.test(root)) {
+        if (await readJSON(file, null)) throw new Error(`${name}: cartographic files unavailable (${err.message}); keeping the published boundaries rather than water-inclusive TIGERweb polygons`);
+        got.includesWater = true;
+        log(`WARNING: ${name} boundaries include water areas (detailed TIGERweb)`);
+      }
     }
-    const bytes = await writeJSON(`${outDir}/geo/${name === 'county' ? 'counties' : 'tracts'}.json`, {
+    const bytes = await writeJSON(file, {
       type: 'FeatureCollection', source: got.source, built: new Date().toISOString(), features: got.features
     });
     summary[name] = { features: got.features.length, source: got.source, bytes, ...(got.includesWater ? { includesWater: true } : {}) };

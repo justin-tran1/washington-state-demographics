@@ -14,7 +14,7 @@
 import { execFileSync } from 'node:child_process';
 import { mkdtemp, writeFile, readFile, readdir } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { fetchRetry, fetchText, arcgisAll, log, writeJSON } from './lib.mjs';
+import { fetchRetry, fetchText, arcgisAll, log, writeJSON, readJSON } from './lib.mjs';
 
 const ROUTES = 'https://data.wsdot.wa.gov/arcgis/rest/services/Shared/TransitData/FeatureServer/3';
 const CATALOG = 'https://files.mobilitydatabase.org/feeds_v2.csv';
@@ -140,7 +140,10 @@ export async function buildTransit(outDir) {
   }
   log(`GTFS agency.txt entries with a website: ${gtfsAgencies.length}`);
 
-  // 3. Match, then fall back to the dominant route_url origin.
+  // 3. Match, then fall back to the website found by the previous build (a
+  // feed that is briefly unreachable must not cost its agency the link), and
+  // only then to the dominant route_url origin.
+  const prev = ((await readJSON(`${outDir}/transit/agencies.json`, null)) || {}).agencies || {};
   const perFeed = {};
   for (const g of gtfsAgencies) perFeed[g.feed] = (perFeed[g.feed] || 0) + 1;
   for (const [key, a] of Object.entries(agencies)) {
@@ -151,6 +154,8 @@ export async function buildTransit(outDir) {
       || gtfsAgencies.find(g => similar(g.name, a.name))
       || gtfsAgencies.find(g => g.feed && perFeed[g.feed] === 1 && similar(g.feed, a.name));
     if (hit) { a.url = hit.url; a.source = 'gtfs agency.txt'; continue; }
+    const before = prev[key];
+    if (before && before.url && /agency\.txt|previous build/.test(before.source || '')) { a.url = before.url; a.source = 'gtfs agency.txt (previous build)'; continue; }
     const origins = Object.entries(routeOrigins[key] || {}).sort((x, y) => y[1] - x[1]);
     if (origins.length) { a.url = origins[0][0]; a.source = 'route_url origin'; }
   }

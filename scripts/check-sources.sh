@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Probes every data source the app depends on - first those the browser calls
+# Probes the data sources the app depends on - first those the browser calls
 # directly (sent with an Origin header, so the CORS column shows whether a
 # browser may read the answer), then those only the data build reads. Records
 # HTTP status, CORS allow-origin and the first bytes of the body.
@@ -42,6 +42,7 @@ probe "wsdot FerryRoutes" GET "https://data.wsdot.wa.gov/arcgis/rest/services/Sh
 # ---- Crime incident feeds (live) ------------------------------------------
 probe "seattle SPD rows" GET 'https://data.seattle.gov/resource/tazs-3rd5.json?$limit=1'
 probe "seattle SPD metadata" GET "https://data.seattle.gov/api/views/tazs-3rd5.json"
+probe "seattle SPD rows (cos-data failover)" GET 'https://cos-data.seattle.gov/resource/tazs-3rd5.json?$limit=1'
 probe "tacoma TPD_RMS_Crime" GET "https://services3.arcgis.com/SCwJH1pD8WSn5T5y/arcgis/rest/services/TPD_RMS_Crime/FeatureServer/0?f=json"
 probe "bellevue Offenses" GET "https://services1.arcgis.com/EYzEZbDhXZjURPbP/arcgis/rest/services/Offenses/FeatureServer/1?f=json"
 probe "redmond Crimes" GET "https://gis.redmond.gov/arcgis/rest/services/CrimeMap/Crimes/FeatureServer/0?f=json"
@@ -61,17 +62,23 @@ probe "overpass (transit fallback)" POST "https://overpass-api.de/api/interprete
 probe "census ACS summary file dir" GET "https://www2.census.gov/programs-surveys/acs/summary_file/2024/table-based-SF/data/5YRData/"
 probe "census cartographic boundary files" GET "https://www2.census.gov/geo/tiger/GENZ2025/shp/"
 probe "census gazetteer files" GET "https://www2.census.gov/geo/docs/maps-data/data/gazetteer/"
+probe "census ACS variable metadata (B27010)" GET "https://api.census.gov/data/2024/acs/acs5/groups/B27010.json"
 probe "tigerweb ACS2024 Tracts (boundary fallback)" GET "https://tigerweb.geo.census.gov/arcgis/rest/services/Generalized_ACS2024/Tracts_Blocks/MapServer?f=json"
 probe "WA DOH hospitals" GET "https://services8.arcgis.com/rGGrs6HCnw87OFOT/arcgis/rest/services/Hospitals/FeatureServer/0?f=json"
 probe "WA DOH HELMS facilities" GET "https://services8.arcgis.com/rGGrs6HCnw87OFOT/arcgis/rest/services/Facility_HELMS_Report_DEC2025/FeatureServer/0?f=json"
 probe "HRSA CMS facilities" GET "https://gisportal.hrsa.gov/server/rest/services/HealthCareFacilities/CMSApprovedFacilities_FS/MapServer?f=json"
 probe "HRSA health centers" GET "https://gisportal.hrsa.gov/server/rest/services/HealthCareFacilities/PrimaryHealthCareFacilities_FS/MapServer/0?f=json"
+probe "HRSA VA facilities" GET "https://gisportal.hrsa.gov/server/rest/services/HealthCareFacilities/VHAFacilities_FS/MapServer/0?f=json"
+probe "CMS hospital general information" GET 'https://data.cms.gov/provider-data/api/1/datastore/query/xubh-q36u/0?limit=1'
+probe "WA DOH public health clinics" GET "https://services8.arcgis.com/rGGrs6HCnw87OFOT/arcgis/rest/services/Clinics/FeatureServer/0?f=json"
 probe "NPPES registry" GET "https://npiregistry.cms.hhs.gov/api/?version=2.1&taxonomy_description=Pharmacy&state=WA&limit=1"
 probe "census batch geocoder" GET "https://geocoding.geo.census.gov/geocoder/benchmarks"
 probe "FDIC locations" GET "https://api.fdic.gov/banks/locations?filters=STALP:WA&limit=1"
 probe "USDA SNAP retailers" GET "https://services1.arcgis.com/RLQu0rK7h4kbsBq5/arcgis/rest/services/snap_retailer_location_data/FeatureServer/0?f=json"
 probe "NREL/NLR fuel stations" GET "https://developer.nlr.gov/api/alt-fuel-stations/v1.json?api_key=DEMO_KEY&state=WA&limit=1"
 probe "NCES k12 folder" GET "https://nces.ed.gov/opengis/rest/services/K12_School_Locations?f=json"
+probe "NCES postsecondary folder" GET "https://nces.ed.gov/opengis/rest/services/Postsecondary_School_Locations?f=json"
+probe "NCUA call report data page" GET "https://ncua.gov/analysis/credit-union-corporate-call-report-data/quarterly-data"
 probe "PAD-US" GET "https://services.arcgis.com/v01gqwM5QqNysAAi/arcgis/rest/services/Manager_Type_PADUS/FeatureServer/0?f=json"
 probe "WA State Parks" GET "https://services5.arcgis.com/4LKAHwqnBooVDUlX/arcgis/rest/services/ParkBoundaries/FeatureServer/2?f=json"
 probe "Mobility Database catalog" GET "https://files.mobilitydatabase.org/feeds_v2.csv"
@@ -79,3 +86,4 @@ probe "WASPC NIBRS (data.wa.gov)" GET 'https://data.wa.gov/resource/vvfu-ry7f.js
 probe "King County Sheriff offenses" GET 'https://data.kingcounty.gov/resource/4kmt-kfqf.json?$limit=1'
 probe "Auburn crimes" GET 'https://data.auburnwa.gov/resource/8g4u-7zzy.json?$limit=1'
 probe "FBI CDE agencies (keyless)" GET "https://cde.ucr.cjis.gov/LATEST/agency/byStateAbbr/WA"
+probe "FBI CDE agencies (api.usa.gov fallback)" GET "https://api.usa.gov/crime/fbi/cde/agency/byStateAbbr/WA?API_KEY=DEMO_KEY"

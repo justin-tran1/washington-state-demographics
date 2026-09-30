@@ -14,7 +14,14 @@ import { Readable } from 'node:stream';
 import { fetchRetry, fetchJSON, fetchText, qs, log, round, writeJSON, WA_FIPS, unzipText, parseGazetteer } from './lib.mjs';
 
 const SF_BASE = y => `https://www2.census.gov/programs-surveys/acs/summary_file/${y}/table-based-SF/data/5YRData`;
-const META = (y, t) => `https://api.census.gov/data/${y}/acs/acs5/groups/${t}.json`; // keyless
+// Variable metadata. It still answers without a key (data queries do not);
+// the key is sent when configured.
+const META = (y, t) => `https://api.census.gov/data/${y}/acs/acs5/groups/${t}.json` +
+  (process.env.CENSUS_API_KEY ? `?key=${encodeURIComponent(process.env.CENSUS_API_KEY)}` : '');
+// B27010's "No health insurance coverage" lines (under 19, 19-34, 35-64,
+// 65+), unchanged since the table was introduced: used if the metadata is
+// unreachable.
+const B27010_UNINSURED = ['017', '033', '050', '066'];
 const TIGERWEB = y => `https://tigerweb.geo.census.gov/arcgis/rest/services/Generalized_ACS${y}`;
 
 // Detailed tables and estimate lines used. Insurance uses detailed table
@@ -54,7 +61,9 @@ async function newestVintage() {
 
 /** Find B27010's "No health insurance coverage" estimate lines from metadata. */
 async function uninsuredLines(y) {
-  const meta = await fetchJSON(META(y, 'B27010'));
+  let meta;
+  try { meta = await fetchJSON(META(y, 'B27010')); }
+  catch (err) { log(`B27010 metadata unavailable (${err.message.replace(/key=[^&\s]+/, 'key=***')}); using lines ${B27010_UNINSURED.join(', ')}`); return B27010_UNINSURED; }
   const lines = Object.entries(meta.variables || {})
     .filter(([k, v]) => /^B27010_\d{3}E$/.test(k) && /No health insurance coverage$/i.test(v.label || ''))
     .map(([k]) => k.slice(7, 10)).sort();

@@ -29,6 +29,9 @@ const FIELDS = ['lat', 'lon', 'name', 'kind', 'src', 'addr', 'ref', 'info', 'web
 // Rite Aid and its Bartell Drugs chain closed every Washington store in 2025,
 // but OpenStreetMap and NPPES still list many of them.
 const CLOSED_PHARMACY = /\brite ?aid\b|\bbartell\b/i;
+// Licensed pharmacies that serve no walk-in public: jails, long-term care,
+// home infusion and mail order.
+const NOT_WALK_IN = /\bjail\b|correction|detention|\bltc\b|long[- ]?term care|omnicare|pharmerica|infusion|mail[- ]?order|closed[- ]door|nuclear|option care|\boptum\b/i;
 
 // ---------------------------------------------------------------- OSM tags
 // Selectors follow the OSM wiki definitions. `kind` maps an element's tags to
@@ -465,7 +468,9 @@ async function helmsPharmacies() {
   for (const f of features) {
     const a = f.attributes;
     const p = pt(f); if (!p) continue;
-    if (CLOSED_PHARMACY.test(`${a.Account_Name || ''} ${a.Organization_Owner__Account_Name || ''}`)) continue;
+    // The owner is checked for closed chains only: Optum, for one, also owns
+    // walk-in clinic pharmacies.
+    if (CLOSED_PHARMACY.test(`${a.Account_Name || ''} ${a.Organization_Owner__Account_Name || ''}`) || NOT_WALK_IN.test(a.Account_Name || '')) continue;
     const addr = String(a.Physical_Address || a.Mailing_Address || '').replace(/,?\s*United States$/i, '').replace(/,\s*Washington\s+\d{5}(-\d{4})?$/i, '');
     rows.push({ ...p, name: titleCase(a.Account_Name || a.Organization_Owner__Account_Name), kind: 'Pharmacy',
       addr: addr || null, info: 'Licensed by the WA Pharmacy Commission', web: /^https?:\/\//i.test(a.Website || '') ? a.Website : null });
@@ -692,7 +697,8 @@ function metres(a, b) {
 const GENERIC = new Set(('the of and at in on for a an inc llc pllc co corp company center centre ctr medical med ' +
   'hospital hosp clinic clinics health healthcare care services service community regional family public ' +
   'chc fqhc campus location bank jpmorgan branch credit union cu fcu na fsb station gas fuel ev charging charger ' +
-  'store stores market supermarket wholesale grocery foods food pharmacy rx drug drugs school park state wa washington ' +
+  'store stores market mart minimart mini deli convenience supermarket wholesale grocery foods food pharmacy rx drug drugs ' +
+  'school park state wa washington ' +
   // Place and direction words: sharing only "Seattle" or "North" says
   // nothing about two places being the same one.
   'north south east west northwest northeast southwest southeast city downtown county puget sound pacific ' +
@@ -710,9 +716,10 @@ const WA_COUNTIES = ('adams|asotin|benton|chelan|clallam|clark|columbia|cowlitz|
   'pierce|san juan|skagit|skamania|snohomish|spokane|stevens|thurston|wahkiakum|walla walla|whatcom|whitman|yakima').split('|');
 
 /**
- * Regex matching Washington place and county names, used for health
- * facilities, whose names so often carry their town ("Mount Vernon VA
- * Clinic", "Mount Vernon Chiropractic") that a shared town says nothing.
+ * Regex matching Washington place and county names. Facility and store names
+ * so often carry their town ("Mount Vernon VA Clinic", "Mount Vernon
+ * Chiropractic"; "Chelan Market", "Chelan Grocery") that a shared town says
+ * nothing about two places being one.
  */
 function placeRegex(placeNames) {
   const names = [...new Set([...placeNames, ...WA_COUNTIES].map(n => String(n).toLowerCase().replace(/['’]/g, '').trim()).filter(n => n.length > 2))]
@@ -786,7 +793,10 @@ const disjoint = (p, q) => {
  *    `spotRadius` (if set) the names must also share a word: Mary Bridge
  *    Children's shares Tacoma General's campus, and a park 40 m from another
  *    park is usually a different park.
- * Distinct places that merely share a building or a campus are kept.
+ * So same-kind places from two sources at one spot merge whatever their
+ * names for clinics (40 m), pharmacies (45 m), banks (40 m) and fuel (30-40
+ * m), where registries and OSM name one place differently; hospitals,
+ * grocery stores and parks need a shared word beyond 30 / 10 / 10 m.
  * groups: [{ rows, approx, inferred }] in priority order; `inferred` marks a
  * source whose classes are guessed from tags (OpenStreetMap).
  */
@@ -900,11 +910,13 @@ const CATEGORIES = {
       OSM_SRC('health')
     ]
   },
-  pharmacy: { radius: 60, classRadius: { x: 45 }, sources: [
+  // Town names are stripped before comparing names (see placeRegex) in every
+  // registry category but parks, whose names are often just the town's.
+  pharmacy: { radius: 60, classRadius: { x: 45 }, places: true, sources: [
     { id: 'doh-helms', name: 'WA DOH licensed pharmacies (HELMS)', url: 'https://doh.wa.gov/licenses-permits-and-certificates/facilities-z/pharmacies', fn: helmsPharmacies, approx: 250 },
     { id: 'nppes', name: 'CMS NPPES NPI registry: community pharmacies (Census-geocoded)', url: 'https://npiregistry.cms.hhs.gov/', fn: nppesPharmacies, fallbackOnly: true, approx: 250 },
     OSM_SRC('pharmacy')] },
-  grocery: { radius: 60,
+  grocery: { radius: 60, places: true,
     classOf: r => /convenience/i.test(r.kind) ? 'conv' : /farmers/i.test(r.kind) ? 'farm' : 'grocery',
     classRadius: { grocery: 60, conv: 30, farm: 60 },
     // Stores sit side by side: unrelated names only merge at the same point.
@@ -914,7 +926,7 @@ const CATEGORIES = {
       OSM_SRC('grocery')] },
   restaurants: { radius: 20, sources: [OSM_SRC('restaurants')] },
   retail: { radius: 20, sources: [OSM_SRC('retail')] },
-  banks: { radius: 60,
+  banks: { radius: 60, places: true,
     classOf: r => /credit union/i.test(r.kind) ? 'cu' : 'bank',
     classRadius: { bank: 40, cu: 40 },
     // "America's Credit Union" is not "Bank of America".
@@ -923,7 +935,7 @@ const CATEGORIES = {
       { id: 'fdic', name: 'FDIC BankFind branch locations', url: 'https://banks.data.fdic.gov/bankfind-suite/', fn: fdicBranches, approx: 250 },
       { id: 'ncua', name: 'NCUA credit union branches (Census-geocoded)', url: 'https://ncua.gov/analysis/credit-union-corporate-call-report-data/quarterly-data', fn: ncuaBranches, approx: 250 },
       { ...OSM_SRC('banks'), name: 'OpenStreetMap (banks & credit unions)' }] },
-  fuel: { radius: 40, crossClassNames: false,
+  fuel: { radius: 40, crossClassNames: false, places: true,
     classOf: r => /EV/i.test(r.kind) ? 'ev' : 'fuel',
     classRadius: { ev: 30, fuel: 40 },
     sources: [
