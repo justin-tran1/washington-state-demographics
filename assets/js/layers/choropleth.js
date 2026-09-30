@@ -16,27 +16,50 @@
     tractIndex: null, tractIndexPromise: null, // statewide centroids + land area
     tractIndexById: null, // GEOID -> index entry
 
+    // Boundaries come from the pre-built, same-origin files first (see
+    // scripts/build-data/boundaries.mjs); TIGERweb and the bundled county
+    // file are fallbacks for a missing or stale build.
     async loadCounties() {
       if (this.counties) return this.counties;
       if (this.countiesPromise) return this.countiesPromise;
       this.countiesPromise = (async () => {
-        try {
-          const fc = await U.tigerweb.counties();
-          if (!fc.features.length) throw new Error('empty');
-          this.countiesSource = 'tigerweb';
-          this.counties = fc;
-        } catch (e) {
-          const fc = await U.fetchJSON(CFG.TIGERWEB.localCounties, { timeout: 15000 });
-          this.countiesSource = 'bundled';
-          this.counties = fc;
+        const attempts = [
+          ['prebuilt', () => U.fetchJSON(CFG.TIGERWEB.prebuilt.county, { timeout: 20000 })],
+          ['tigerweb', () => U.tigerweb.counties()],
+          ['bundled', () => U.fetchJSON(CFG.TIGERWEB.localCounties, { timeout: 15000 })]
+        ];
+        let lastErr;
+        for (const [source, load] of attempts) {
+          try {
+            const fc = await load();
+            if (!fc || !fc.features || !fc.features.length) throw new Error('empty');
+            this.countiesSource = source;
+            this.counties = fc;
+            return fc;
+          } catch (e) { lastErr = e; }
         }
-        return this.counties;
+        throw lastErr;
       })();
       this.countiesPromise.catch(() => { this.countiesPromise = null; });
       return this.countiesPromise;
     },
 
+    tractsStatewide: null, tractsPromise: null, tractsFileFailed: false,
     async loadTractsInView(map) {
+      // Statewide file: loaded once, then every tract is available. A failed
+      // load is not retried on every pan: TIGERweb serves the rest of the session.
+      if (!this.tractsStatewide && !this.tractsFileFailed) {
+        if (!this.tractsPromise) {
+          this.tractsPromise = U.fetchJSON(CFG.TIGERWEB.prebuilt.tract, { timeout: 60000, retries: 1 }).then(fc => {
+            if (!fc || !fc.features || fc.features.length < 1000) throw new Error('incomplete tract file');
+            for (const f of fc.features) this.tractCache.set(f.properties.GEOID, f);
+            this.tractsStatewide = true;
+          });
+          this.tractsPromise.catch(() => { this.tractsPromise = null; this.tractsFileFailed = true; });
+        }
+        try { await this.tractsPromise; } catch (e) { /* fall back to TIGERweb */ }
+      }
+      if (this.tractsStatewide) return this.tractCache;
       const bounds = map.getBounds().pad(0.25);
       const fc = await U.tigerweb.tractsInView(bounds);
       for (const f of fc.features) {
@@ -47,19 +70,25 @@
       return this.tractCache;
     },
 
-    /** Statewide tract centroids + land areas (one light request, reused by
-     *  density binning and the drive-time analytics). */
+    /** Statewide tract internal points + land areas, from the pre-built ACS
+     *  tract file (TIGERweb INTPTLAT/INTPTLON, which are guaranteed to fall
+     *  inside the tract - better than a centroid for point-in-polygon work).
+     *  Used by the drive-time reach statistics. */
     async loadTractIndex() {
       if (this.tractIndex) return this.tractIndex;
-      if (this.tractIndexPromise) return this.tractIndexPromise;
-      const wa = CFG.MAP.waBounds;
-      const bounds = L.latLngBounds([wa.south, wa.west], [wa.north, wa.east]);
-      this.tractIndexPromise = U.tigerweb.tractCentroidsInEnvelope(bounds).then(pts => {
-        this.tractIndex = pts;
-        this.tractIndexById = new Map(pts.map(p => [p.geoid, p]));
-        return pts;
-      });
-      this.tractIndexPromise.catch(() => { this.tractIndexPromise = null; });
+      if (!this.tractIndexPromise) {
+        this.tractIndexPromise = U.censusStore.load('tract').then(acs => {
+          const pts = [];
+          for (const [geoid, r] of Object.entries(acs.rows)) {
+            if (r.lat != null && r.lon != null) pts.push({ geoid, lat: r.lat, lon: r.lon, aland: r.aland });
+          }
+          if (!pts.length) throw new Error('no tract internal points in the ACS data');
+          this.tractIndex = pts;
+          this.tractIndexById = new Map(pts.map(p => [p.geoid, p]));
+          return pts;
+        });
+        this.tractIndexPromise.catch(() => { this.tractIndexPromise = null; });
+      }
       return this.tractIndexPromise;
     },
     alandOf(geoid) {
@@ -91,7 +120,12 @@
     // Colors resolve per theme at draw time, never captured at construction.
     const ramp = () => U.theme.colors()[rampKey];
     const noData = () => U.theme.colors().noData;
-    const renderer = L.canvas({ padding: 0.3 });
+    // Polygons share the map's single canvas with transit lines and crime
+    // circles (one canvas hit-tests all of them). So a hovered area is not
+    // raised with bringToFront, which would lift it over those layers for
+    // good; a non-interactive outline is drawn on top instead.
+    let hoverOutline = null;
+    const clearHover = () => { if (hoverOutline) { map.removeLayer(hoverOutline); hoverOutline = null; } };
 
     const state = {
       enabled: false,
@@ -133,11 +167,12 @@
     function valueFor(geoid, acs, feature) {
       const row = acs.rows[geoid];
       if (!row) return null;
-      if (state.metric.needsArea) {
+      // Land area ships with the ACS rows; the boundary attribute is only a
+      // fallback (the bundled county outlines carry no AREALAND at all).
+      if (state.metric.needsArea && !(row.aland > 0)) {
         const aland = feature && feature.properties.AREALAND != null
           ? feature.properties.AREALAND : geoStore.alandOf(geoid);
-        if (aland == null) return null;
-        return state.metric.value(Object.assign({}, row, { aland }));
+        return aland > 0 ? state.metric.value(Object.assign({}, row, { aland })) : null;
       }
       return state.metric.value(row);
     }
@@ -145,31 +180,9 @@
     async function computeBreaks(level, acs) {
       const key = level + ':' + state.metric.id + ':' + acs.vintage;
       if (state.breaksCache[key]) return state.breaksCache[key];
-      let values;
-      if (state.metric.needsArea) {
-        if (level === 'county') {
-          const fc = await geoStore.loadCounties();
-          values = fc.features.map(f => {
-            const geoid = f.properties.GEOID;
-            const aland = f.properties.AREALAND;
-            const row = acs.rows[geoid];
-            return (row && aland > 0) ? state.metric.value(Object.assign({}, row, { aland })) : null;
-          });
-        } else {
-          const idx = await geoStore.loadTractIndex().catch(() => null);
-          if (idx) {
-            values = idx.map(p => {
-              const row = acs.rows[p.geoid];
-              return (row && p.aland > 0) ? state.metric.value(Object.assign({}, row, { aland: p.aland })) : null;
-            });
-          } else { // fall back to whatever tracts are cached
-            values = Array.from(geoStore.tractCache.values()).map(f =>
-              valueFor(f.properties.GEOID, acs, f));
-          }
-        }
-      } else {
-        values = Object.values(acs.rows).map(r => state.metric.value(r));
-      }
+      // Every metric, density included, can be binned straight from the
+      // statewide ACS rows, so the legend is stable wherever the view is.
+      const values = Object.values(acs.rows).map(r => state.metric.value(r));
       const q = U.geo.quantileBreaks(values, ramp().length);
       state.breaksCache[key] = q;
       return q;
@@ -196,7 +209,6 @@
           features = fc.features;
         } else {
           await geoStore.loadTractsInView(map);
-          if (state.metric.needsArea) await geoStore.loadTractIndex().catch(() => {});
           features = Array.from(geoStore.tractCache.values());
         }
         if (token !== renderToken || !state.enabled) return;
@@ -212,9 +224,9 @@
         state.renderKey = renderKey;
 
         if (state.layer) { map.removeLayer(state.layer); state.layer = null; }
+        clearHover();
         state.level = level;
         state.layer = L.geoJSON({ type: 'FeatureCollection', features }, {
-          renderer,
           style: f => {
             const v = valueFor(f.properties.GEOID, acs, f);
             return {
@@ -225,10 +237,12 @@
           onEachFeature: (f, lyr) => {
             const geoid = f.properties.GEOID;
             lyr.on('mouseover', () => {
-              lyr.setStyle({ weight: 2.5, color: U.theme.colors().hoverOutline });
-              if (lyr.bringToFront) lyr.bringToFront();
+              clearHover();
+              hoverOutline = L.geoJSON(f, {
+                interactive: false, style: { fill: false, weight: 2.5, color: U.theme.colors().hoverOutline, opacity: 1 }
+              }).addTo(map);
             });
-            lyr.on('mouseout', () => state.layer && state.layer.resetStyle(lyr));
+            lyr.on('mouseout', clearHover);
             const row = acs.rows[geoid];
             const v = valueFor(geoid, acs, f);
             const name = (row && row.name ? row.name.split(';')[0] : f.properties.NAME) || geoid;
@@ -263,7 +277,8 @@
     function profileHTML(geoid, feature, acs) {
       const row = acs.rows[geoid] || null;
       const name = (row && row.name ? row.name : (feature.properties.NAME || geoid));
-      const aland = feature.properties.AREALAND != null ? feature.properties.AREALAND : geoStore.alandOf(geoid);
+      const aland = row && row.aland > 0 ? row.aland
+        : (feature.properties.AREALAND != null ? feature.properties.AREALAND : geoStore.alandOf(geoid));
       const withArea = row ? Object.assign({}, row, { aland }) : null;
       const lines = [];
       const push = (label, val) => lines.push(
@@ -291,7 +306,7 @@
         `<span>${f(stops[i])} – ${f(stops[i + 1])}</span></div>`).join('');
       legendBox.innerHTML =
         `<div class="legend-title">${U.escapeHTML(state.metric.label)}</div>` +
-        `<div class="legend-sub">${level === 'tract' ? 'by census tract' : 'by county'} · quintiles statewide</div>` +
+        `<div class="legend-sub">${level === 'tract' ? 'by census tract' : 'by county'} · ${ramp().length} equal-count classes statewide</div>` +
         rows +
         `<div class="legend-row"><span class="swatch" style="background:${noData()}"></span><span>No data</span></div>` +
         `<div class="legend-src">ACS 5-Year ${acs.span}, U.S. Census Bureau</div>`;
@@ -331,6 +346,7 @@
         } else {
           renderToken++;
           if (state.layer) { map.removeLayer(state.layer); state.layer = null; }
+          clearHover();
           state.renderKey = null;
           legendBox.style.display = 'none';
           setStatus('Off');

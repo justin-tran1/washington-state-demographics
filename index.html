@@ -88,7 +88,7 @@
 
         <div class="layer-card" id="card-insurance">
           <div class="card-head">
-            <span class="card-title">🩺 Health insurance <span class="tag">ACS S2701</span></span>
+            <span class="card-title">🩺 Health insurance <span class="tag">ACS B27010</span></span>
             <label class="card-toggle switch" title="Show/hide"><input type="checkbox"><span class="knob"></span></label>
           </div>
           <div class="card-body"></div>
@@ -96,7 +96,7 @@
 
         <div class="layer-card" id="card-amenities">
           <div class="card-head">
-            <span class="card-title">🛍️ Amenities <span class="tag">NCES + OSM</span></span>
+            <span class="card-title">🛍️ Amenities <span class="tag">registries + OSM</span></span>
             <label class="card-toggle switch" title="Show/hide"><input type="checkbox"><span class="knob"></span></label>
           </div>
           <div class="card-body"></div>
@@ -112,7 +112,7 @@
 
         <div class="layer-card" id="card-crime">
           <div class="card-head">
-            <span class="card-title">🚨 Crime <span class="tag">police open data</span></span>
+            <span class="card-title">🚨 Crime <span class="tag">statewide + local</span></span>
             <label class="card-toggle switch" title="Show/hide"><input type="checkbox"><span class="knob"></span></label>
           </div>
           <div class="card-body"></div>
@@ -120,8 +120,8 @@
       </section>
 
       <footer class="side-footer">
-        All data loads live from public services (U.S. Census Bureau, NCES, WSDOT, city police departments, OpenStreetMap, Valhalla).
-        Estimates carry uncertainty — see <a href="#" id="about-link">Sources &amp; methodology</a>.
+        Census, boundary, amenity and statewide crime data are published with the map and refreshed monthly (crime incident files weekly);
+        transit, police incident feeds, search and drive times load live. Estimates carry uncertainty — see <a href="#" id="about-link">Sources &amp; methodology</a>.
       </footer>
     </aside>
 
@@ -139,9 +139,10 @@
         <button id="about-close" class="icon-btn" aria-label="Close">✕</button>
       </div>
       <div class="modal-body" id="sources-content">
-        <p class="modal-intro">Everything on this map is fetched live from public, authoritative services — nothing is
-        pre-baked except a bundled fallback copy of county boundaries. Layers note their exact source and vintage in
-        their legend or status line.</p>
+        <p class="modal-intro">Census estimates, boundaries, amenities, statewide crime totals and the geocoded King County
+        Sheriff and Auburn incidents are read from public, authoritative sources by a GitHub Action and published with the
+        map (monthly; the incident files weekly). Transit, the other police departments' incident feeds, address search and
+        drive times are queried live. Layers note their exact source and vintage in their legend, status line or tooltips.</p>
       </div>
     </div>
   </div>

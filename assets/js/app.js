@@ -26,7 +26,10 @@
       center: CFG.MAP.center, zoom: CFG.MAP.zoom,
       minZoom: CFG.MAP.minZoom, maxZoom: CFG.MAP.maxZoom,
       maxBounds: CFG.MAP.maxBounds, maxBoundsViscosity: 0.8,
-      zoomControl: false, preferCanvas: true
+      // One canvas for every vector layer: Leaflet hit-tests a canvas only
+      // against its own layers, so a second one on top would swallow the
+      // clicks and hovers meant for the layers below it.
+      zoomControl: false, preferCanvas: true, renderer: L.canvas({ padding: 0.3 })
     });
     L.control.zoom({ position: 'topright' }).addTo(map);
     L.control.scale({ position: 'bottomleft', imperial: true, metric: true }).addTo(map);

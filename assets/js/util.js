@@ -40,6 +40,51 @@
     let t; return function (...a) { clearTimeout(t); t = setTimeout(() => fn.apply(this, a), ms); };
   };
 
+  /**
+   * Add markers to a MarkerClusterGroup in time-sliced batches; returns a
+   * function that cancels the rest. markercluster's own chunkedLoading keeps
+   * adding after clearLayers()/removeLayers() and throws once its group is
+   * off the map, so groups fed through here are built with it switched off.
+   */
+  function addLayersChunked(group, layers, onDone) {
+    let i = 0, cancelled = false;
+    (function step() {
+      if (cancelled) return;
+      const t0 = performance.now();
+      while (i < layers.length && performance.now() - t0 < 40) {
+        group.addLayers(layers.slice(i, i + 1000));
+        i += 1000;
+      }
+      if (i < layers.length) setTimeout(step, 0);
+      else if (onDone) onDone();
+    })();
+    return () => { cancelled = true; };
+  }
+
+  // Washington wall-clock time: feeds publish "floating" timestamps without
+  // a UTC offset, and incidents are shown in local (Pacific) time whatever
+  // the viewer's own time zone.
+  const PT = 'America/Los_Angeles';
+  let ptOffsetFmt = null;
+  function pacificOffset(t) {
+    try {
+      ptOffsetFmt = ptOffsetFmt || new Intl.DateTimeFormat('en-US', { timeZone: PT, timeZoneName: 'shortOffset' });
+      const part = ptOffsetFmt.formatToParts(new Date(t)).find(x => x.type === 'timeZoneName');
+      return -parseInt(String(part && part.value).replace('GMT', ''), 10) || 8;
+    } catch (e) { return 8; }
+  }
+  /** Epoch ms of a timestamp; one without an offset is read as Pacific time. */
+  function parsePacific(s) {
+    const str = String(s == null ? '' : s).trim();
+    if (/(z|[+-]\d\d:?\d\d)$/i.test(str)) return Date.parse(str);
+    const m = str.match(/^(\d{4})-(\d\d)-(\d\d)(?:[T ](\d\d):(\d\d)(?::(\d\d))?)?/);
+    if (!m) return Date.parse(str);
+    const wall = Date.UTC(+m[1], +m[2] - 1, +m[3], +(m[4] || 0), +(m[5] || 0), +(m[6] || 0));
+    for (const h of [7, 8]) if (pacificOffset(wall + h * 3600000) === h) return wall + h * 3600000;
+    return wall + 8 * 3600000;
+  }
+  const fmtPacific = d => d.toLocaleString('en-US', { timeZone: PT, dateStyle: 'medium', timeStyle: 'short' }) + ' PT';
+
   // --------------------------------------------------------------- storage
   const store = {
     get(key) {
@@ -92,6 +137,8 @@
   };
 
   // ------------------------------------------------------------------ http
+  // Relative URLs (same-origin data/ files) have no host of their own.
+  const hostOf = url => { try { return new URL(url, location.href).host + (/^https?:/i.test(url) ? '' : '/' + url); } catch (e) { return url; } };
   async function fetchJSON(url, opts = {}) {
     const { timeout = 30000, retries = 1, init = {} } = opts;
     let lastErr;
@@ -101,10 +148,10 @@
       try {
         const res = await fetch(url, Object.assign({ signal: ctl.signal }, init));
         clearTimeout(timer);
-        if (!res.ok) throw new Error('HTTP ' + res.status + ' from ' + new URL(url).host);
+        if (!res.ok) throw new Error('HTTP ' + res.status + ' from ' + hostOf(url));
         const text = await res.text();
         try { return JSON.parse(text); }
-        catch (e) { throw new Error('Bad JSON from ' + new URL(url).host); }
+        catch (e) { throw new Error('Bad JSON from ' + hostOf(url)); }
       } catch (err) {
         clearTimeout(timer);
         lastErr = err;
@@ -212,7 +259,7 @@
 
   // --------------------------------------------------------------- socrata
   async function socrataQuery(domains, dataset, soql, opts = {}) {
-    const pageSize = 5000;
+    const pageSize = 20000; // SODA allows up to 50,000 per request
     const maxRows = opts.maxRows || 25000;
     let lastErr;
     for (const domain of domains) {
@@ -276,39 +323,12 @@
   };
 
   // ---------------------------------------------------------------- census
-  // Shared ACS store: one statewide pull per geography level, cached.
+  // ACS 5-year estimates, built at deploy time by the build-data GitHub Action
+  // and served same-origin from data/acs/. The browser no longer calls the
+  // Census Data API at all: since 2025 it returns a "Missing Key" HTML page to
+  // every keyless request, which is what broke these layers.
   const censusStore = {
     _mem: {}, vintage: null, _pending: {},
-    derive(row) {
-      const n = k => {
-        const v = row[k] === undefined ? null : Number(row[k]);
-        return (v == null || isNaN(v) || v < 0) ? null : v; // negatives = ACS suppression sentinels
-      };
-      const pop = n('B01003_001E');
-      const edu = n('B15003_001E');
-      const eduHi = ['B15003_022E', 'B15003_023E', 'B15003_024E', 'B15003_025E']
-        .map(n).reduce((a, b) => (a == null || b == null ? null : a + b), 0);
-      const povU = n('B17001_001E'), pov = n('B17001_002E');
-      const lf = n('B23025_003E'), unemp = n('B23025_005E');
-      const occ = n('B25003_001E'), own = n('B25003_002E');
-      const insUniv = n('S2701_C01_001E');
-      let pctIns = n('S2701_C03_001E');
-      let pctUnins = n('S2701_C05_001E');
-      if (pctIns != null && pctUnins != null && Math.abs(pctIns + pctUnins - 100) > 2) pctIns = null;
-      if (pctIns == null && pctUnins != null) pctIns = Math.max(0, 100 - pctUnins);
-      return {
-        name: row.NAME || '',
-        pop, households: n('B11001_001E'),
-        medAge: n('B01002_001E'), medInc: n('B19013_001E'), perCap: n('B19301_001E'),
-        medHome: n('B25077_001E'), medRent: n('B25064_001E'),
-        pctBach: (edu && eduHi != null) ? (100 * eduHi / edu) : null,
-        pctPoverty: (povU && pov != null) ? (100 * pov / povU) : null,
-        pctUnemp: (lf && unemp != null) ? (100 * unemp / lf) : null,
-        pctOwner: (occ && own != null) ? (100 * own / occ) : null,
-        insUniverse: insUniv, pctInsured: pctIns, pctUninsured: pctUnins,
-        aland: null // merged later from boundary attributes
-      };
-    },
     async load(level) { // level: 'county' | 'tract'
       if (this._mem[level]) return this._mem[level];
       if (this._pending[level]) return this._pending[level];
@@ -316,130 +336,72 @@
       return this._pending[level];
     },
     async _load(level) {
-      const C = CFG.CENSUS;
-      const cacheKey = 'acs:' + level;
-      const cached = store.get(cacheKey);
-      if (cached && cached.rows && cached.vintage) {
-        this.vintage = cached.vintage;
-        this._mem[level] = cached;
-        return cached;
+      let data;
+      try {
+        data = await fetchJSON(CFG.CENSUS.prebuilt[level], { timeout: 30000, retries: 1 });
+      } catch (err) {
+        throw new Error('ACS ' + level + ' data file unavailable (' + err.message + ')');
       }
-      const forClause = level === 'tract' ? 'tract:*' : 'county:*';
-      const inClause = level === 'tract' ? `state:${C.stateFips} county:*` : `state:${C.stateFips}`;
-      let lastErr;
-      const vintages = this.vintage ? [this.vintage] : C.vintages;
-      for (const vintage of vintages) {
-        try {
-          const base = `${C.apiBase}/${vintage}/acs/acs5`;
-          const urlDet = `${base}?get=${['NAME'].concat(C.detailedVars).join(',')}&for=${encodeURIComponent(forClause)}&in=${encodeURIComponent(inClause)}`;
-          const urlSub = `${base}/subject?get=${C.subjectVars.join(',')}&for=${encodeURIComponent(forClause)}&in=${encodeURIComponent(inClause)}`;
-          const [det, sub] = await Promise.all([
-            fetchJSON(urlDet, { timeout: 45000 }),
-            fetchJSON(urlSub, { timeout: 45000 })
-          ]);
-          const toMap = table => {
-            const header = table[0];
-            const out = {};
-            for (let i = 1; i < table.length; i++) {
-              const row = {};
-              header.forEach((h, j) => { row[h] = table[i][j]; });
-              const geoid = (row.state || '') + (row.county || '') + (row.tract || '');
-              out[geoid] = row;
-            }
-            return out;
-          };
-          const dm = toMap(det), sm = toMap(sub);
-          const rows = {};
-          for (const [geoid, row] of Object.entries(dm)) {
-            rows[geoid] = this.derive(Object.assign({}, row, sm[geoid] || {}));
-          }
-          const result = { vintage, rows, span: `${vintage - 4}-${vintage}` };
-          this.vintage = vintage;
-          this._mem[level] = result;
-          store.set(cacheKey, result, C.cacheTtlMs);
-          return result;
-        } catch (err) { lastErr = err; }
+      if (!data || !Array.isArray(data.fields) || !data.rows) throw new Error('ACS ' + level + ' data file is malformed');
+      const F = data.fields;
+      const rows = {};
+      for (const [geoid, vals] of Object.entries(data.rows)) {
+        const rec = { name: (data.names && data.names[geoid]) || '' };
+        for (let i = 0; i < F.length; i++) rec[F[i]] = vals[i];
+        rows[geoid] = rec;
       }
-      throw lastErr || new Error('Census API unavailable');
+      const result = { vintage: data.vintage, span: data.span, source: data.source, built: data.built, rows };
+      this.vintage = data.vintage;
+      this._mem[level] = result;
+      return result;
     }
   };
 
   // ------------------------------------------------------------- tigerweb
-  // Boundary provider with vintage fallback + service/layer discovery.
+  // Live boundary fallback, used only when the pre-built data/geo files
+  // cannot be loaded. Each root is tried in turn until one answers with
+  // usable features: the generalized services carry GEOID but no STATE field
+  // (and name their fields differently), the detailed service has both.
   const tigerweb = {
-    _resolved: null,
-    async resolve() {
-      if (this._resolved) return this._resolved;
+    _good: {}, // level -> root that answered with usable features
+    async _layerUrl(root, level) {
       const T = CFG.TIGERWEB;
-      let lastErr;
-      for (const root of T.roots) {
+      const svc = `${root}/${level === 'tract' ? T.tractService : T.countyService}`;
+      const layer = arcgis.findLayer(await arcgis.serviceInfo(svc), level === 'tract' ? T.tractLayerName : T.countyLayerName, /label/i);
+      if (!layer) throw new Error(level + ' layer not found');
+      return `${svc}/${layer.id}`;
+    },
+    async _query(level, extra, opts) {
+      const fips = CFG.CENSUS.stateFips;
+      const roots = this._good[level] ? [this._good[level]] : CFG.TIGERWEB.roots;
+      let lastErr = null, emptyAnswer = false;
+      for (const root of roots) {
         try {
-          const tractsSvc = `${root}/${T.tractService}`;
-          const countySvc = `${root}/${T.countyService}`;
-          const [ti, ci] = await Promise.all([arcgis.serviceInfo(tractsSvc), arcgis.serviceInfo(countySvc)]);
-          const tractLayer = arcgis.findLayer(ti, T.tractLayerName, /label/i);
-          const countyLayer = arcgis.findLayer(ci, T.countyLayerName, /label/i);
-          if (!tractLayer || !countyLayer) throw new Error('layers not found');
-          this._resolved = {
-            root,
-            tractUrl: `${tractsSvc}/${tractLayer.id}`,
-            countyUrl: `${countySvc}/${countyLayer.id}`
-          };
-          return this._resolved;
+          const fc = await arcgis.query(await this._layerUrl(root, level), Object.assign({
+            where: /Generalized/.test(root) ? `GEOID LIKE '${fips}%'` : `STATE = '${fips}'`,
+            outFields: '*', geometryPrecision: 5
+          }, extra), opts);
+          const features = [];
+          for (const f of fc.features) {
+            const p = f.properties || {};
+            const geoid = String(p.GEOID || p.GEOID20 || '');
+            if (!f.geometry || !geoid.startsWith(fips)) continue;
+            features.push({ type: 'Feature', geometry: f.geometry, properties: {
+              GEOID: geoid, NAME: p.NAME || p.BASENAME || geoid,
+              AREALAND: p.AREALAND != null ? p.AREALAND : p.ALAND, AREAWATER: p.AREAWATER != null ? p.AREAWATER : p.AWATER
+            } });
+          }
+          if (features.length) { this._good[level] = root; return { type: 'FeatureCollection', features }; }
+          if (fc.features.length) throw new Error('features without GEOID'); // wrong layer shape: next root
+          emptyAnswer = true; // nothing in view here: try the next root, then accept
         } catch (err) { lastErr = err; }
       }
+      if (emptyAnswer) return { type: 'FeatureCollection', features: [] };
+      delete this._good[level];
       throw lastErr || new Error('TIGERweb unavailable');
     },
-    async tractsInView(bounds) {
-      const r = await this.resolve();
-      return arcgis.query(r.tractUrl, Object.assign({
-        where: `STATE = '${CFG.CENSUS.stateFips}'`,
-        outFields: 'GEOID,NAME,AREALAND,AREAWATER',
-        geometryPrecision: 5
-      }, arcgis.envelope(bounds)), { pageSize: 1000, maxFeatures: 6000 });
-    },
-    async counties() {
-      const r = await this.resolve();
-      return arcgis.query(r.countyUrl, {
-        where: `STATE = '${CFG.CENSUS.stateFips}'`,
-        outFields: 'GEOID,NAME,AREALAND,AREAWATER',
-        geometryPrecision: 5
-      }, { pageSize: 100, maxFeatures: 200 });
-    },
-    async tractCentroidsInEnvelope(bounds) {
-      const r = await this.resolve();
-      // Centroids are only emitted in Esri JSON output, so page through f=json
-      // by hand here instead of using arcgis.query.
-      const pts = [];
-      try {
-        let offset = 0;
-        for (;;) {
-          const p = Object.assign({
-            where: `STATE = '${CFG.CENSUS.stateFips}'`,
-            outFields: 'GEOID,AREALAND', returnGeometry: false, returnCentroid: true,
-            outSR: 4326, f: 'json', resultRecordCount: 1000, resultOffset: offset
-          }, arcgis.envelope(bounds));
-          const data = await fetchJSON(r.tractUrl + '/query?' + qs(p), { timeout: 45000 });
-          if (data.error) throw new Error(data.error.message || 'query error');
-          const feats = data.features || [];
-          for (const f of feats) {
-            const c = f.centroid;
-            if (c && c.x !== undefined) {
-              pts.push({ geoid: f.attributes.GEOID, lon: c.x, lat: c.y, aland: f.attributes.AREALAND });
-            }
-          }
-          if (feats.length < 1000 || offset > 8000) break;
-          offset += feats.length;
-        }
-      } catch (e) { /* fall through to geometry-based centroids */ }
-      if (pts.length) return pts;
-      // Fallback: fetch geometry and compute centroids client-side.
-      const fc2 = await this.tractsInView(bounds);
-      return fc2.features.map(f => {
-        const c = geo.polygonCentroid(f.geometry);
-        return c ? { geoid: f.properties.GEOID, lon: c[0], lat: c[1], aland: f.properties.AREALAND } : null;
-      }).filter(Boolean);
-    }
+    tractsInView(bounds) { return this._query('tract', arcgis.envelope(bounds), { pageSize: 1000, maxFeatures: 6000 }); },
+    counties() { return this._query('county', {}, { pageSize: 100, maxFeatures: 200 }); }
   };
 
   // -------------------------------------------------------------- geometry
@@ -462,32 +424,6 @@
       if (geom.type === 'Polygon') return this.polygonContains(geom.coordinates, lon, lat);
       if (geom.type === 'MultiPolygon') return geom.coordinates.some(p => this.polygonContains(p, lon, lat));
       return false;
-    },
-    /** Area-weighted centroid of the largest outer ring of a (Multi)Polygon. */
-    polygonCentroid(geom) {
-      const rings = geom && (geom.type === 'Polygon' ? [geom.coordinates[0]]
-        : geom.type === 'MultiPolygon' ? geom.coordinates.map(p => p[0]) : null);
-      if (!rings || !rings.length) return null;
-      let best = null, bestArea = -1;
-      for (const ring of rings) {
-        let a = 0, cx = 0, cy = 0;
-        for (let i = 0, n = ring.length; i < n; i++) {
-          const [x1, y1] = ring[i], [x2, y2] = ring[(i + 1) % n];
-          const cross = x1 * y2 - x2 * y1;
-          a += cross; cx += (x1 + x2) * cross; cy += (y1 + y2) * cross;
-        }
-        const absA = Math.abs(a);
-        if (absA > bestArea && absA > 1e-12) {
-          bestArea = absA;
-          best = [cx / (3 * a), cy / (3 * a)];
-        }
-      }
-      if (!best && rings[0].length) {
-        let sx = 0, sy = 0;
-        for (const [x, y] of rings[0]) { sx += x; sy += y; }
-        best = [sx / rings[0].length, sy / rings[0].length];
-      }
-      return best;
     },
     /** Rough geodesic area of a GeoJSON polygon geometry, in square miles. */
     areaSqMi(geom) {
@@ -533,27 +469,28 @@
   }
   const geocode = {
     async search(query) {
+      const G = CFG.GEOCODE;
       const results = [];
-      const looksLikeAddress = /\d/.test(query);
-      if (looksLikeAddress) {
-        try {
-          const G = CFG.GEOCODE;
-          const q = /washington|,\s*wa\b|\bwa\s*$|\d{5}/i.test(query) ? query : query + ', WA';
-          const data = await fetchJSON(G.censusUrl + '?' + qs({
-            address: q, benchmark: G.censusBenchmark, format: 'json'
-          }), { timeout: 20000 });
-          for (const m of ((data.result || {}).addressMatches || []).slice(0, 5)) {
-            results.push({
-              label: m.matchedAddress, lat: m.coordinates.y, lon: m.coordinates.x,
-              source: 'U.S. Census Geocoder'
-            });
-          }
-        } catch (e) { /* fall through to Nominatim */ }
-      }
+      const inWA = (lat, lon) => lat >= 45.4 && lat <= 49.1 && lon >= -124.9 && lon <= -116.8;
+      // Primary: Esri World Geocoder - rooftop-level US addresses and named
+      // places, restricted to Washington's extent.
+      try {
+        const data = await fetchJSON(G.esriFind + '?' + qs({
+          SingleLine: query, f: 'json', maxLocations: 8, countryCode: 'USA',
+          searchExtent: G.esriExtent, outFields: 'Match_addr,Addr_type,Region'
+        }), { timeout: 15000 });
+        for (const c of (data.candidates || [])) {
+          const lat = c.location && c.location.y, lon = c.location && c.location.x;
+          if (lat == null || !inWA(lat, lon) || c.score < 70) continue;
+          const region = c.attributes && c.attributes.Region;
+          if (region && !/washington/i.test(region)) continue;
+          results.push({ label: c.address, lat, lon, source: 'Esri World Geocoder', score: c.score });
+        }
+      } catch (e) { /* fall through to Nominatim */ }
       if (!results.length) {
-        const data = await nominatim(CFG.GEOCODE.nominatimSearch, {
+        const data = await nominatim(G.nominatimSearch, {
           q: query, format: 'jsonv2', addressdetails: 0, limit: 8,
-          viewbox: CFG.GEOCODE.viewbox, bounded: 1, countrycodes: 'us'
+          viewbox: G.viewbox, bounded: 1, countrycodes: 'us'
         });
         for (const m of data) {
           results.push({ label: m.display_name, lat: +m.lat, lon: +m.lon, source: 'OpenStreetMap Nominatim' });
@@ -572,7 +509,7 @@
   };
 
   WAMAP.util = {
-    $, $$, el, escapeHTML, fmt, debounce, store, fetchJSON, qs,
+    $, $$, el, escapeHTML, fmt, debounce, addLayersChunked, parsePacific, fmtPacific, store, fetchJSON, qs,
     arcgis, socrataQuery, socrataColumns, overpass, censusStore, tigerweb, geo, geocode, theme
   };
 })();
