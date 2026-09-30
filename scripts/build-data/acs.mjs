@@ -74,7 +74,9 @@ export const SOURCE_TABLES = {
 // Medicare and employer coverage to employer, which needs work status these
 // tables lack. The combinations B27010 does not spell out ("other private
 // only", "other public only", "other coverage combinations") stay together
-// as "other".
+// as "other", except their Medicaid holders: the Medicaid table counts
+// everyone with Medicaid, so those move to Medicaid exactly (see
+// insuranceCounts).
 export const PAYER_OF = {
   employerOnly: 'employer', 'employer+direct': 'employer',
   directOnly: 'direct',
@@ -373,9 +375,22 @@ export function insuranceCounts(T, lines) {
     const vals = T(s.table);
     sources[field] = { with: sumLines(vals, s.with), no: sumLines(vals, s.no), total: vals['001'] ?? null };
   }
+  // KFF counts everyone with Medicaid under Medicaid, whatever else they
+  // hold. B27010 names only Medicaid alone and Medicare + Medicaid; the rest
+  // of its Medicaid holders sit in its unnamed combinations. The Medicaid
+  // table counts them all, so the difference moves from "other" to Medicaid.
+  // Both tables tabulate the same survey records, so the move can never be
+  // negative or larger than "other"; if it were, the area is flagged.
+  let medicaidMoved = null, inconsistent = false;
+  const md = sources.srcMedicaid;
+  if (md && md.with != null && payer.medicaid != null && payer.other != null) {
+    medicaidMoved = md.with - payer.medicaid;
+    if (medicaidMoved < 0 || medicaidMoved > payer.other) inconsistent = true;
+    else { payer.medicaid += medicaidMoved; payer.other -= medicaidMoved; }
+  }
   return {
     total: ins['001'] ?? null, payer, dual: sumLines(ins, lines.payer['medicare+medicaid']),
-    leaves: sumLines(ins, Object.values(lines.payer).flat()), sources
+    leaves: sumLines(ins, Object.values(lines.payer).flat()), sources, medicaidMoved, inconsistent
   };
 }
 
@@ -415,6 +430,7 @@ export async function buildACS(outDir) {
       const insTotal = ic.total;
       // Components must add up to their totals: a wrong line mapping would not.
       if (ic.leaves != null && insTotal != null && ic.leaves !== insTotal) mismatch.push(`${g} B27010 ${ic.leaves}/${insTotal}`);
+      if (ic.inconsistent) mismatch.push(`${g} Medicaid holders ${ic.sources.srcMedicaid.with} vs B27010 Medicaid lines and other combinations`);
       for (const [f, c] of Object.entries(ic.sources)) {
         if (c.with != null && c.no != null && c.total != null && c.with + c.no !== c.total) mismatch.push(`${g} ${insLines.sources[f].table} ${c.with}+${c.no}/${c.total}`);
       }
@@ -474,11 +490,15 @@ export async function buildACS(outDir) {
         universe: 'Civilian noninstitutionalized population',
         // The ACS table behind each field, for citing it.
         tables: Object.fromEntries(FIELDS.filter(f => /^(pm|pctUninsured|pctInsured|insUniverse)/.test(f)).map(f => [f, 'B27010'])
-          .concat(Object.entries(insLines.sources).map(([f, x]) => [f, x.table]))),
+          .concat(Object.entries(insLines.sources).map(([f, x]) => [f, x.table]))
+          .concat(insLines.sources.srcMedicaid ? [['pmMedicaid', `B27010+${insLines.sources.srcMedicaid.table}`], ['pmOther', `B27010+${insLines.sources.srcMedicaid.table}`]] : [])),
         missing: insLines.missing,
         uninsured: `B27010 lines ${insLines.payer.uninsured.join('+')} / B27010_001`,
         payerMix: Object.fromEntries(PAYERS.map(p => [p, Object.entries(insLines.payer)
           .filter(([k]) => PAYER_OF[k] === p).map(([k, ls]) => `${k}: B27010 ${ls.join('+')}`)])),
+        medicaidRule: insLines.sources.srcMedicaid
+          ? `medicaid = everyone with Medicaid (${insLines.sources.srcMedicaid.table}); the difference from B27010's Medicaid lines comes out of "other"`
+          : 'medicaid = B27010 Medicaid lines only (no Medicaid table published)',
         sources: Object.fromEntries(Object.entries(insLines.sources).map(([f, s]) => [f, `${s.table} lines ${s.with.join('+')} / ${s.table}_001`]))
       },
       built: new Date().toISOString(), fields: FIELDS, names, rows
