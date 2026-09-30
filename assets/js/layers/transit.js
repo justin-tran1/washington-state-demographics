@@ -385,7 +385,8 @@
       const jobs = [];
       let note = '';
 
-      if (state.showRoutes && !force && holds('routes')) pending.routes = true;
+      // (Zooming out past the routes' minimum zoom clears them regardless.)
+      if (state.showRoutes && !force && zoom >= CFG.TRANSIT.routesMinZoom && holds('routes')) pending.routes = true;
       else if (state.showRoutes) {
         if (zoom < CFG.TRANSIT.routesMinZoom) { state.routesGen++; routesLayer.clearLayers(); state.lastRoutesKey = null; note = 'Zoom in for routes (z' + CFG.TRANSIT.routesMinZoom + '+). '; }
         else {
@@ -407,7 +408,7 @@
           }
         }
       }
-      if (state.showStops && !force && holds('stops')) pending.stops = true;
+      if (state.showStops && !force && zoom >= CFG.TRANSIT.stopsMinZoom && holds('stops')) pending.stops = true;
       else if (state.showStops) {
         if (zoom < CFG.TRANSIT.stopsMinZoom) { state.stopsGen++; setStops([]); state.lastStopsKey = null; }
         else {

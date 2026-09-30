@@ -64,7 +64,9 @@ const OSM = {
   pharmacy: {
     // dispensing=no marks a drugstore without a pharmacy counter.
     selectors: ['["amenity"="pharmacy"]["dispensing"!="no"]', '["healthcare"="pharmacy"]["dispensing"!="no"]', '["shop"="chemist"]["dispensing"="yes"]'],
-    exclude: CLOSED_PHARMACY,
+    // Closed chains by name, brand or operator; closed-door pharmacies by
+    // their own name only (Optum also operates walk-in clinic pharmacies).
+    exclude: (t, name) => CLOSED_PHARMACY.test([name, t.brand, t.operator].filter(Boolean).join(' ')) || NOT_WALK_IN.test(name || ''),
     kind: () => 'Pharmacy'
   },
   restaurants: {
@@ -136,7 +138,8 @@ async function osmCategory(id) {
     const kind = spec.kind(t);
     const name = t.name || t.brand || t.operator || null;
     if (!name && !(spec.keepUnnamed && spec.keepUnnamed(t))) continue;
-    if (spec.exclude && spec.exclude.test([name, t.brand, t.operator].filter(Boolean).join(' '))) continue;
+    if (spec.exclude && (typeof spec.exclude === 'function' ? spec.exclude(t, name)
+      : spec.exclude.test([name, t.brand, t.operator].filter(Boolean).join(' ')))) continue;
     // Unnamed features keep name null: they must never match each other by
     // name (every unnamed playground is called "Playground").
     rows.push({
