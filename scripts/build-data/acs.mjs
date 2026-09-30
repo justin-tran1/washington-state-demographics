@@ -42,23 +42,27 @@ const TABLES = {
 //  - B27010 (types of health insurance coverage by age) splits it into
 //    mutually exclusive coverage combinations: the uninsured share and the
 //    payer mix come from it.
-//  - B27002-B27009 count everyone holding each type of coverage, alone or
-//    with other types: the insurance sources (they add up to more than 100%).
+//  - B27002 (private) and B27003 (public), and the single-type tables
+//    27004-27009, count everyone holding each type of coverage, alone or with
+//    other types: the insurance sources (they add up to more than 100%). The
+//    5-year estimates publish the single-type tables collapsed, as C27004 to
+//    C27009 (B27004-B27009 are 1-year only); each is looked up in turn.
 // Every line is identified from its Census label at build time, nothing is
 // hardcoded. A line that cannot be identified stops the step, so the last
 // good files stay published.
 
-// Coverage-by-type tables: [table, what each "With ..." line must say,
-// what it must not say (catches a table number pointing somewhere else)].
+// Coverage-by-type tables: [candidate tables in order, what each "With ..."
+// line must say, what it must not say (catches a table number pointing
+// somewhere else)].
 export const SOURCE_TABLES = {
-  srcPrivate: ['B27002', /private/i, /employer|direct|tricare/i],
-  srcPublic: ['B27003', /public/i, /medicare|medicaid|\bva\b/i],
-  srcEmployer: ['B27004', /employer/i, /direct|medicare|medicaid/i],
-  srcDirect: ['B27005', /direct[- ]purchase/i, /employer|medicare|medicaid/i],
-  srcMedicare: ['B27006', /medicare/i, /medicaid|employer|direct/i],
-  srcMedicaid: ['B27007', /medicaid|means[- ]tested/i, /medicare|employer|direct/i],
-  srcTricare: ['B27008', /tricare|military/i, /employer|direct|medicare|medicaid/i],
-  srcVA: ['B27009', /\bva\b|veterans/i, /employer|direct|medicare|medicaid/i]
+  srcPrivate: [['B27002', 'C27002'], /private/i, /employer|direct|tricare/i],
+  srcPublic: [['B27003', 'C27003'], /public/i, /medicare|medicaid|\bva\b/i],
+  srcEmployer: [['B27004', 'C27004'], /employer/i, /direct|medicare|medicaid/i],
+  srcDirect: [['B27005', 'C27005'], /direct[- ]purchase/i, /employer|medicare|medicaid/i],
+  srcMedicare: [['B27006', 'C27006'], /medicare/i, /medicaid|employer|direct/i],
+  srcMedicaid: [['B27007', 'C27007'], /medicaid|means[- ]tested/i, /medicare|employer|direct/i],
+  srcTricare: [['B27008', 'C27008'], /tricare|military/i, /employer|direct|medicare|medicaid/i],
+  srcVA: [['B27009', 'C27009'], /\bva\b|veterans/i, /employer|direct|medicare|medicaid/i]
 };
 
 // Payer mix: each B27010 combination goes to one payer, following KFF's
@@ -142,20 +146,36 @@ export function sourceLines(table, rows, must, mustNot) {
   return { table, with: withL.map(r => r.line), no: noL.map(r => r.line) };
 }
 
-/** Metadata for every insurance table: the B27010 kinds and the source lines. */
+/**
+ * Metadata for every insurance table: the B27010 kinds and the source lines.
+ * A coverage type none of whose candidate tables is published for the
+ * vintage is left empty (and reported); any other metadata failure stops
+ * the step.
+ */
 async function insuranceLines(y) {
   const meta = async t => {
     try { return await fetchJSON(META(y, t)); }
-    catch (err) { throw new Error(`${t} metadata unavailable (${err.message.replace(/key=[^&\s]+/, 'key=***')})`); }
+    catch (err) {
+      if (/HTTP 404/.test(err.message)) return null; // not published for this vintage
+      throw new Error(`${t} metadata unavailable (${err.message.replace(/key=[^&\s]+/, 'key=***')})`);
+    }
   };
-  const payer = payerLines(tableLines('B27010', await meta('B27010')));
+  const b27010 = await meta('B27010');
+  if (!b27010) throw new Error(`B27010 is not published for ${y}`);
+  const payer = payerLines(tableLines('B27010', b27010));
   log('B27010 lines: ' + Object.entries(payer).map(([k, ls]) => `${k} ${ls.join('+')}`).join('; '));
-  const sources = {};
-  for (const [field, [table, must, mustNot]] of Object.entries(SOURCE_TABLES)) {
-    sources[field] = sourceLines(table, tableLines(table, await meta(table)), must, mustNot);
-    log(`${table} (${field}): "with" lines ${sources[field].with.join(',')}`);
+  const sources = {}, missing = [];
+  for (const [field, [ids, must, mustNot]] of Object.entries(SOURCE_TABLES)) {
+    for (const table of ids) {
+      const m = await meta(table);
+      if (!m) continue;
+      sources[field] = sourceLines(table, tableLines(table, m), must, mustNot);
+      break;
+    }
+    if (sources[field]) log(`${sources[field].table} (${field}): "with" lines ${sources[field].with.join(',')}`);
+    else { missing.push(field); log(`WARNING ${field}: none of ${ids.join(', ')} is published for ${y}; left empty`); }
   }
-  return { payer, sources };
+  return { payer, sources, missing };
 }
 
 export const FIELDS = ['pop', 'households', 'medAge', 'medInc', 'perCap', 'medHome', 'medRent',
@@ -163,7 +183,7 @@ export const FIELDS = ['pop', 'households', 'medAge', 'medInc', 'perCap', 'medHo
   'aland', 'lat', 'lon',
   // payer mix (B27010, mutually exclusive, % of the universe; pmDual is part of pmMedicaid)
   'pmEmployer', 'pmDirect', 'pmMedicare', 'pmMedicaid', 'pmMilitary', 'pmOther', 'pmDual',
-  // insurance sources (B27002-B27009, alone or in combination, % of the universe)
+  // insurance sources (B27002, B27003, C27004-C27009: alone or in combination, % of the universe)
   'srcPrivate', 'srcEmployer', 'srcDirect', 'srcTricare', 'srcPublic', 'srcMedicare', 'srcMedicaid', 'srcVA'];
 
 /** Newest ACS 5-year vintage whose Summary File directory exists. */
@@ -409,7 +429,7 @@ export async function buildACS(outDir) {
         }
       }
       const pctUnins = pct(ic.payer.uninsured, insTotal);
-      const srcPct = f => pct(ic.sources[f].with, ic.sources[f].total);
+      const srcPct = f => (ic.sources[f] ? pct(ic.sources[f].with, ic.sources[f].total) : null);
       const tg = tiger[level][g] || {};
       const rec = {
         pop: T('B01003')['001'] ?? null,
@@ -452,6 +472,10 @@ export async function buildACS(outDir) {
         : 'U.S. Census Bureau, ACS 5-Year Summary File (table-based)',
       insurance: {
         universe: 'Civilian noninstitutionalized population',
+        // The ACS table behind each field, for citing it.
+        tables: Object.fromEntries(FIELDS.filter(f => /^(pm|pctUninsured|pctInsured|insUniverse)/.test(f)).map(f => [f, 'B27010'])
+          .concat(Object.entries(insLines.sources).map(([f, x]) => [f, x.table]))),
+        missing: insLines.missing,
         uninsured: `B27010 lines ${insLines.payer.uninsured.join('+')} / B27010_001`,
         payerMix: Object.fromEntries(PAYERS.map(p => [p, Object.entries(insLines.payer)
           .filter(([k]) => PAYER_OF[k] === p).map(([k, ls]) => `${k}: B27010 ${ls.join('+')}`)])),
@@ -478,12 +502,13 @@ export async function buildACS(outDir) {
       const sh = n => round(100 * n / state.total, 1);
       s.statewide = {
         payerMix: Object.fromEntries(PAYERS.map(p => [p, sh(state.payer[p])])), dual: sh(state.dual),
-        sources: Object.fromEntries(Object.keys(SOURCE_TABLES).map(f => [f, round(100 * state.src[f] / state.srcTotal[f], 1)]))
+        sources: Object.fromEntries(Object.keys(insLines.sources).map(f => [f, round(100 * state.src[f] / state.srcTotal[f], 1)]))
       };
+      if (insLines.missing.length) s.statewide.missingSources = insLines.missing;
       const B = { employer: [35, 70], direct: [2, 20], medicare: [8, 30], medicaid: [8, 35], military: [0.5, 10], other: [0, 15], uninsured: [1, 25],
         srcPrivate: [50, 85], srcEmployer: [40, 75], srcDirect: [4, 25], srcTricare: [1, 10], srcPublic: [20, 50], srcMedicare: [10, 30], srcMedicaid: [10, 35], srcVA: [0.5, 6] };
       const shares = { ...s.statewide.payerMix, ...s.statewide.sources };
-      const off = Object.entries(B).filter(([k, [lo, hi]]) => !(shares[k] >= lo && shares[k] <= hi));
+      const off = Object.entries(B).filter(([k, [lo, hi]]) => !insLines.missing.includes(k) && !(shares[k] >= lo && shares[k] <= hi));
       if (off.length) throw new Error(`implausible statewide insurance shares: ${off.map(([k]) => `${k} ${shares[k]}%`).join(', ')}`);
       const sum = PAYERS.reduce((a, p) => a + state.payer[p], 0);
       if (sum !== state.total) throw new Error(`payer mix covers ${sum} of ${state.total} people`);
