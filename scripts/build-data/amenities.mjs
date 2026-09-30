@@ -746,16 +746,21 @@ function nameInfo(name, cat) {
   let decl = null;
   for (const [cls, re] of Object.entries(cat.kindWords || {})) if (re.test(raw)) { decl = cls; break; }
   const plain = words.filter(w => !STOP.has(w));
-  // Branch numbers only: after "#", "no", "store", "unit", or trailing a
-  // name ("QFC 803", "7-Eleven 23228 C"). Never a brand that starts with
-  // digits ("7-Eleven", "76", "99 Ranch") or a street address in the name.
-  const nm = raw.match(/(?:#|\bno\.?\s|\bstore\s|\bunit\s)\s*(\d[\d-]*)/) || raw.match(/[a-z)\-]\s+(\d[\d-]*)(?:\s+[a-z])?\s*$/);
+  // Branch numbers only: after "#", "no", "store", "unit", or ending a name
+  // but for a letter or generic words ("QFC 803", "7-Eleven 23228 C",
+  // "Waterway 18 Park"). Never a brand that starts with digits ("7-Eleven",
+  // "76", "99 Ranch") or a street address in the name.
+  const tail = raw.match(/[a-z)\-]\s+(\d[\d-]*)((?:\s+[a-z]+)*)\s*$/);
+  const nm = raw.match(/(?:#|\bno\.?\s|\bstore\s|\bunit\s)\s*(\d[\d-]*)/)
+    || (tail && tail[2].split(/\s+/).every(w => w.length < 2 || GENERIC.has(w)) ? tail : null);
   return {
     tok: new Set(tok.map(stem)), withBrands: new Set(brandsKept.map(stem)),
     // "Am/pm" and "ampm", "New Berry" and "Newberry": the words run together.
     squash: brandsKept.map(stem).join(''),
     all: new Set(plain.filter(w => !/^[a-z]?\d+[a-z]?$/.test(w)).map(stem)),
     norm: plain.join(' '),
+    // Numbers are judged in merge(): "Y.V.M.H. Station 1" / "... Station 2".
+    bare: plain.filter(w => !/^[a-z]?\d+[a-z]?$/.test(w)).join(' '),
     num: nm ? nm[1].replace(/^0+(?=\d)/, '') : '',
     digits: words.filter(w => /\d/.test(w)).join(' '),
     decl
@@ -793,7 +798,9 @@ function sameNameAs(p, q, cat) {
   }
   const A = p.tok, B = q.tok;
   if (p.squash.length >= 5 && p.squash === q.squash) return true;
-  if (!A.size || !B.size) return p.norm === q.norm;
+  // No distinctive word left ("Seattle Pharmacy"): the whole name decides,
+  // numbers aside unless the names are nothing else ("76", "24/7").
+  if (!A.size || !B.size) return p.bare || q.bare ? p.bare === q.bare : p.norm === q.norm;
   const o = overlap(A, B);
   return p.src === q.src ? o === 1 : o >= 0.6;
 }
@@ -821,8 +828,9 @@ const disjoint = (p, q) => {
  * names for clinics (40 m), pharmacies (45 m), banks (40 m) and fuel (30-40
  * m), where registries and OSM name one place differently; hospitals,
  * grocery stores and parks need a shared word beyond 30 / 10 / 10 m.
- * groups: [{ rows, approx, inferred }] in priority order; `inferred` marks a
- * source whose classes are guessed from tags (OpenStreetMap).
+ * groups: [{ rows, approx, inferred, units }] in priority order; `inferred`
+ * marks a source whose classes are guessed from tags (OpenStreetMap), `units`
+ * one that lists each unit of a site as its own row.
  */
 function merge(groups, cat) {
   const { radius, classOf = () => 'x', classRadius = {}, nameRadius = {}, spotRadius = {} } = cat;
@@ -851,7 +859,7 @@ function merge(groups, cat) {
     return p.src === q.src ? base : Math.max(base, p.approx, q.approx);
   };
   const kept = [], counts = [], drops = [];
-  groups.forEach(({ rows, approx = 0, inferred = false }, si) => {
+  groups.forEach(({ rows, approx = 0, inferred = false, units = false }, si) => {
     let n = 0;
     for (const row of rows) {
       const unnamed = row.unnamed || !row.name || row.name === row.kind;
@@ -871,15 +879,21 @@ function merge(groups, cat) {
             && !(spotRadius[p.cls] != null && d > spotRadius[p.cls] && disjoint(p, q))) { hit = { q, d, rule: 'class' }; break; }
           // One street address, one kind of place, a shared name word: two
           // registries geocoding the same site differently (CMS lists FQHCs by
-          // organisation, HRSA by site). Unrelated tenants of one building stay.
+          // organisation, HRSA by site). Unrelated tenants of one building
+          // stay, as do names claiming different kinds (the health district's
+          // Leavenworth office in Cascade Medical Center's building).
           if (p.addrKey && p.addrKey === q.addrKey && q.src !== si && q.cls === p.cls && d < Math.max(r2, p.approx, q.approx)
-            && !disjoint(p, q)) { hit = { q, d, rule: 'address' }; break; }
-          // Two numbered branches of one chain are never the same place, and a
-          // registry's rows that differ only in numbers ("... 8720 14th Ave S",
-          // "... 8801 14th Ave S") are separate sites; within the same-spot
-          // radius, though, the numbers are just separate listings of one site
-          // (AFDC lists "CITY HALL 1", "CITY HALL 2" for one charging site).
-          if (d > r2 && ((p.num && q.num && p.num !== q.num) || (q.src === si && p.digits !== q.digits))) continue;
+            && !disjoint(p, q) && !(p.decl && q.decl && p.decl !== q.decl)) { hit = { q, d, rule: 'address' }; break; }
+          // Two numbered branches of one chain are never the same place, nor
+          // are a source's rows whose names differ in their numbers: "Sea Mar
+          // CHC 6334 / 6336 Littlerock Rd" are two sites, "Wapato Online
+          // Academy K-5 / 6-8" two schools. At one spot, a numbered and an
+          // unnumbered copy of a name are one place, and so are the rows of a
+          // source that lists each unit of a site (AFDC: "CITY HALL 1", "CITY
+          // HALL 2" are two chargers of one station).
+          const renumbered = q.src === si && p.digits !== q.digits;
+          if (d > r2 ? (p.num && q.num && p.num !== q.num) || renumbered
+            : renumbered && p.digits && q.digits && !units) continue;
           if (d < nameR(p, q) && sameNameAs(p, q, cat)) { hit = { q, d, rule: 'name' }; break; }
         }
         if (hit) break;
@@ -979,7 +993,7 @@ const CATEGORIES = {
     classOf: r => /EV/i.test(r.kind) ? 'ev' : 'fuel',
     classRadius: { ev: 30, fuel: 40 },
     sources: [
-      { id: 'afdc', name: 'NREL Alternative Fuels Data Center (public stations)', url: 'https://afdc.energy.gov/stations', fn: afdcStations },
+      { id: 'afdc', name: 'NREL Alternative Fuels Data Center (public stations)', url: 'https://afdc.energy.gov/stations', fn: afdcStations, units: true },
       OSM_SRC('fuel')] },
   // Park points from different sources can sit far apart for big parks (a
   // centroid vs an entrance): each registry row carries its park's spread as
@@ -1036,7 +1050,7 @@ export async function buildAmenities(outDir, only) {
       }
     }
     if (!got.length) { summary[id] = { error: 'every source failed', sources: info }; continue; }
-    const { kept, counts, drops } = merge(got.map(g => ({ rows: g.rows, approx: g.s.approx || 0, inferred: g.s.id === 'osm' })), cat);
+    const { kept, counts, drops } = merge(got.map(g => ({ rows: g.rows, approx: g.s.approx || 0, inferred: g.s.id === 'osm', units: !!g.s.units })), cat);
     got.forEach((g, i) => { const x = info.find(y => y.id === g.s.id); if (x) x.kept = counts[i]; });
     // Every dropped hospital is logged, so a wrong merge can be spotted in the run log.
     for (const x of drops.filter(x => x.p.cls === 'hospital')) {
