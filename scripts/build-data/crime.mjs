@@ -251,7 +251,8 @@ async function buildKCSO(outDir) {
  */
 function toBlock(addr) {
   const a = String(addr || '').split(/[;,]/)[0]
-    .replace(/\s+(#|apt|apartment|unit|ste|suite|spc|space|lot|trlr|bldg|rm|room)(?![a-z]).*$/i, '')
+    .replace(/\s*#.*$/, '') // "#B-403", "# D": a unit, whatever follows
+    .replace(/\s+(apt|apartment|unit|ste|suite|spc|space|lot|trlr|bldg|rm|room)(?![a-z]).*$/i, '')
     .replace(/\s+/g, ' ').trim();
   const m = a.match(/^(\d+)[A-Z]?(?:-[A-Z0-9]+)?\s+(.+)$/i);
   if (!m) return /&|\//.test(a) ? { street: a, label: a } : null;
