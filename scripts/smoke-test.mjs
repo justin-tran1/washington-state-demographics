@@ -148,6 +148,165 @@ const ISO_FC = {
   }))
 };
 
+// ---- zoning atlas and the medical site evaluation, around a pin on a state route in Wenatchee.
+// Every service is mocked; the parcel, address and city map service are fictional.
+const SITE = { lat: 47.4390, lon: -120.3250 };
+const site = { fail: new Set(), liveCode: 'CC', ownerAsked: false, hits: {} };
+const siteHit = k => { site.hits[k] = (site.hits[k] || 0) + 1; };
+const box = (lon, lat, dx, dy) => [[lon - dx, lat - dy], [lon + dx, lat - dy], [lon + dx, lat + dy], [lon - dx, lat + dy], [lon - dx, lat - dy]];
+const ZONE_BASE = { GEOID: '5377105', Jurisdiction: 'Wenatchee', COUNTYFP: '007', COUNTYNAME: 'Chelan', UseResidential: 'P', UseManufacturing: 'X',
+  DimMaxHeight: -9999, DimMaxStories: null, DimBonusMaxHeight: null, DimMaxFar: null, DimBonusMaxFar: null, DimMaxLotCoverBuildings: null,
+  DimMaxLotCoverBuildingsAndImpSu: null, DenMinLotSizeSqFt: null, MinParkingOffice: null, Info: null, ReferenceURL: null, WAZASpatialNormalizationDate: '2024-11-06' };
+const WAZA_ZONES = [
+  { id: 1001, p: { ZoneID: 'CC', ZoneName: 'Community Commercial', WAZAZoneGeneral: 'MXU', WAZAZoneSpecific: 'MXU4', UseOffice: 'P', UseRetail: 'P',
+    DimMaxHeight: 45, DimMaxLotCoverBuildings: 75, MinParkingOffice: 3, Info: 'Design review applies along SR 285.',
+    ReferenceURL: 'https://example.org/code/wenatchee/zoning' }, g: box(SITE.lon, SITE.lat, 0.002, 0.0015) },
+  { id: 1002, p: { ZoneID: 'R6', ZoneName: 'Single Family Residential', WAZAZoneGeneral: 'LIR', WAZAZoneSpecific: 'SR5-12', UseOffice: 'X', UseRetail: 'X' },
+    g: box(SITE.lon + 0.004, SITE.lat, 0.002, 0.0015) },
+  { id: 1003, p: { ZoneID: 'PUB', ZoneName: 'Public', WAZAZoneGeneral: 'PUB', WAZAZoneSpecific: 'PUBLIC', UseOffice: 'X', UseRetail: 'X' },
+    g: box(SITE.lon, SITE.lat + 0.003, 0.002, 0.0015) },
+  { id: 1004, p: { GEOID: '53007', Jurisdiction: 'Unincorporated Chelan County', ZoneID: 'RR5', ZoneName: 'Rural Residential/Resource 5', WAZAZoneGeneral: 'RUR',
+    WAZAZoneSpecific: 'RR5+', UseOffice: 'X', UseRetail: 'X' }, g: box(SITE.lon - 0.004, SITE.lat - 0.003, 0.002, 0.0015) },
+  { id: 1005, p: { ZoneID: 'C-2', ZoneName: 'General Business', WAZAZoneGeneral: null, WAZAZoneSpecific: null, UseOffice: null, UseRetail: null },
+    g: box(SITE.lon + 0.004, SITE.lat + 0.003, 0.002, 0.0015) }
+].map(z => ({ type: 'Feature', properties: Object.assign({ OBJECTID: z.id }, ZONE_BASE, z.p), geometry: { type: 'Polygon', coordinates: [z.g] } }));
+const JURIS = {
+  city: { GEOID: '5377105', Jurisdiction: 'Wenatchee', COUNTYNAME: 'Chelan', CodeURL: 'https://example.org/code/wenatchee',
+    ZoningGISURL: 'https://gis.example.org/arcgis/rest/services/City_Zoning/FeatureServer/2',
+    ZoningFileURL: null, ZoneIDField: 'Zoning', SpatialSource: 'Service', WAZACODEADOPTIONDATE: 1725148800000 },
+  county: { GEOID: '53007', Jurisdiction: 'Unincorporated Chelan County', COUNTYNAME: 'Chelan', CodeURL: 'https://example.org/code/chelan-county', ZoningGISURL: null, ZoneIDField: null }
+};
+const ringBox = ring => ring.reduce((b, [x, y]) => [Math.min(b[0], x), Math.min(b[1], y), Math.max(b[2], x), Math.max(b[3], y)], [180, 90, -180, -90]);
+const inRing = (ring, x, y) => { let c = false; for (let i = 0, j = ring.length - 1; i < ring.length; j = i++) { const [xi, yi] = ring[i], [xj, yj] = ring[j]; if ((yi > y) !== (yj > y) && x < (xj - xi) * (y - yi) / (yj - yi) + xi) c = !c; } return c; };
+function asFC(features, u) {
+  const out = u.searchParams.get('outFields') || '*', noGeom = u.searchParams.get('returnGeometry') === 'false';
+  const feats = features.map(f => ({ type: 'Feature', geometry: noGeom ? null : f.geometry,
+    properties: out === '*' ? f.properties : Object.fromEntries(out.split(',').filter(k => k in f.properties).map(k => [k, f.properties[k]])) }));
+  if (u.searchParams.get('f') === 'geojson') return { type: 'FeatureCollection', features: feats };
+  return { features: feats.map(x => ({ attributes: x.properties, geometry: x.geometry && { rings: x.geometry.coordinates } })) };
+}
+function nearPoint(u, features) {
+  const [x, y] = (u.searchParams.get('geometry') || '').split(',').map(Number);
+  const d = +(u.searchParams.get('distance') || 0), dLat = d / 111320, dLon = d / (111320 * Math.cos(y * Math.PI / 180));
+  return features.filter(f => {
+    const ring = f.geometry.coordinates[0];
+    if (inRing(ring, x, y)) return true;
+    const [w, s, e, n] = ringBox(ring);
+    return x >= w - dLon && x <= e + dLon && y >= s - dLat && y <= n + dLat;
+  });
+}
+const lineNearSite = (dx, dy, horiz) => ({ type: 'LineString', coordinates: horiz
+  ? [[SITE.lon - 0.01, SITE.lat + dy], [SITE.lon + 0.01, SITE.lat + dy]] : [[SITE.lon + dx, SITE.lat - 0.01], [SITE.lon + dx, SITE.lat + 0.01]] });
+function siteMock(u, method, postData) {
+  const host = u.hostname, j = o => ({ contentType: 'application/json', body: JSON.stringify(o), headers: { 'Access-Control-Allow-Origin': '*' } });
+  const down = { status: 500, contentType: 'text/plain', body: 'down' };
+  // zoning atlas
+  if (host === 'services6.arcgis.com' && u.pathname.includes('WAZA_Prototype_Layers')) {
+    const m = u.pathname.match(/FeatureServer\/(\d)(\/query)?/);
+    if (!m) return j({ layers: [] });
+    const layer = +m[1];
+    if (!m[2]) {
+      siteHit('zoningMeta');
+      return j({ name: 'Zones', type: 'Feature Layer', maxRecordCount: 2000, fields: [
+        { name: 'WAZAZoneGeneral', type: 'esriFieldTypeString', domain: { type: 'codedValue', codedValues: [['MXU', 'Mixed Use'], ['LIR', 'Low-Intensity Residential'], ['PUB', 'Public and Semi-Public Use'], ['RUR', 'Rural']].map(([code, name]) => ({ code, name })) } },
+        { name: 'WAZAZoneSpecific', type: 'esriFieldTypeString', domain: { type: 'codedValue', codedValues: [['MXU4', 'Mixed-use Low-rise (up to 4 stories)'], ['SR5-12', 'Suburban Residential (5-12 units per acre)']].map(([code, name]) => ({ code, name })) } }] });
+    }
+    if (site.fail.has('zoning')) return down;
+    const [x, y] = (u.searchParams.get('geometry') || '').split(',').map(Number);
+    if (layer === 0) {
+      const where = u.searchParams.get('where') || '';
+      const byId = where.match(/OBJECTID\s*=\s*(\d+)/), byCode = where.match(/UPPER\(ZoneID\)\s*=\s*'([^']*)'/);
+      if (byId) { siteHit('zoneById'); return j(asFC(WAZA_ZONES.filter(z => z.properties.OBJECTID === +byId[1]), u)); }
+      if (byCode) { siteHit('zoneByCode'); return j(asFC(WAZA_ZONES.filter(z => z.properties.ZoneID.toUpperCase() === byCode[1]), u)); }
+      if (u.searchParams.get('geometryType') === 'esriGeometryEnvelope') {
+        siteHit('zoneCells');
+        const [w, s, e, n] = u.searchParams.get('geometry').split(',').map(Number);
+        return j(asFC(WAZA_ZONES.filter(z => { const [a, b, c, d] = ringBox(z.geometry.coordinates[0]); return a <= e && c >= w && b <= n && d >= s; }), u));
+      }
+      siteHit('zoneAtPoint');
+      return j(asFC(nearPoint(u, WAZA_ZONES), u));
+    }
+    const inCity = !inRing(WAZA_ZONES[3].geometry.coordinates[0], x, y);
+    if (layer === 1) return j(asFC(inCity ? [{ type: 'Feature', properties: { GEOID: '5377105', Jurisdiction: 'Wenatchee', ZoneID: 'DR', ZoneName: 'Downtown design review overlay' }, geometry: null }] : [], u));
+    return j(asFC([{ type: 'Feature', properties: inCity ? JURIS.city : JURIS.county, geometry: null }], u));
+  }
+  // the city's own zoning layer, which the atlas records
+  if (host === 'gis.example.org' && u.pathname.includes('City_Zoning')) {
+    siteHit('liveZone');
+    return j({ features: [{ attributes: { Zoning: site.liveCode } }] });
+  }
+  // statewide parcels
+  if (host === 'services.arcgis.com' && u.pathname.includes('Current_Parcels')) {
+    if (!u.pathname.endsWith('/query')) return j({ name: 'Parcels_2026', fields: [{ name: 'LANDUSE_CD', type: 'esriFieldTypeSmallInteger', domain: { type: 'codedValue',
+      codedValues: [{ code: 59, name: '59 - Other retail trade' }, { code: 91, name: '91 - Undeveloped land' }] } }] });
+    siteHit('parcels');
+    if (/owner|taxpayer/i.test(u.searchParams.get('outFields') || '')) site.ownerAsked = true;
+    const [x, y] = (u.searchParams.get('geometry') || '').split(',').map(Number);
+    const parcel = { type: 'Feature', geometry: { type: 'Polygon', coordinates: [box(SITE.lon, SITE.lat, 0.0012, 0.0008)] }, properties: {
+      PARCEL_ID_NR: '007-000000000001', ORIG_PARCEL_ID: '000000000001', SITUS_ADDRESS: '100 EXAMPLE AVE', SITUS_CITY_NM: 'WENATCHEE', SITUS_ZIP_NR: '98801',
+      LANDUSE_CD: 59, VALUE_LAND: 1200000, VALUE_BLDG: 800000, DATA_LINK: 'https://example.org/assessor/000000000001', Shape__Area: 85600 } };
+    return j(asFC(Math.abs(x - SITE.lon) < 0.003 && Math.abs(y - SITE.lat) < 0.003 ? [parcel] : [], u));
+  }
+  // WSDOT functional class and traffic counts
+  if (host === 'data.wsdot.wa.gov' && u.pathname.includes('FunctionalClass/WSDOTFunctionalClassData')) {
+    siteHit('roads');
+    const state = /FeatureServer\/0\/query/.test(u.pathname), out = u.searchParams.get('outFields') || '';
+    if ((state && /RoadName/.test(out)) || (!state && /StateRouteNumber/.test(out))) return j({ error: { code: 400, message: 'Failed to execute query.' } });
+    return j(asFC([state
+      ? { type: 'Feature', properties: { FederalFunctionalClassCode: 3, FederalFunctionalClassDesc: 'Urban Other Principal Arterial', StateRouteNumber: '285' }, geometry: lineNearSite(-0.0005) }
+      : { type: 'Feature', properties: { FederalFunctionalClassCode: 4, FederalFunctionalClassDesc: 'Urban Minor Arterial', RoadName: 'Fifth St' }, geometry: lineNearSite(0, 0.00135, true) }], u));
+  }
+  if (host === 'data.wsdot.wa.gov' && u.pathname.includes('Shared/TrafficData/FeatureServer/1/query')) {
+    siteHit('traffic');
+    return j(asFC([{ type: 'Feature', properties: { StateRouteNumber: '285', AADT: 14000, Location: 'From Milepost 7.69 A to Milepost 10.02 A', ReportingYear: 2025 }, geometry: lineNearSite(-0.0005) }], u));
+  }
+  // elevation (a 3% grade rising to the north) and flood zones
+  if (host === 'epqs.nationalmap.gov') {
+    siteHit('epqs');
+    if (site.fail.has('epqs')) return down;
+    return j({ value: 674.6 + (+u.searchParams.get('y') - SITE.lat) * 111320 * 0.03 * 3.28084, resolution: 1 });
+  }
+  if (host === 'api.open-meteo.com') { siteHit('openMeteo'); return j({ elevation: (u.searchParams.get('latitude') || '').split(',').map(() => 205) }); }
+  if (host === 'hazards.fema.gov') {
+    siteHit('flood');
+    if (site.fail.has('flood')) return down;
+    return j(asFC([{ type: 'Feature', properties: { FLD_ZONE: 'X', ZONE_SUBTY: 'AREA OF MINIMAL FLOOD HAZARD', SFHA_TF: 'F', STATIC_BFE: -9999 }, geometry: null }], u));
+  }
+  // Overpass: the site query (parking, shelters, interchanges)
+  if (u.pathname.includes('interpreter') && /social_facility/.test(decodeURIComponent(postData || ''))) {
+    siteHit('overpass');
+    if (site.fail.has('overpass')) return { status: 504, contentType: 'text/plain', body: 'gateway timeout' };
+    const dLat = m => m / 111320, dLon = m => m / (111320 * Math.cos(SITE.lat * Math.PI / 180));
+    const way = (id, cx, cy, w, h, tags) => ({ type: 'way', id, tags, geometry: box(cx, cy, dLon(w / 2), dLat(h / 2)).map(([lon, lat]) => ({ lat, lon })) });
+    return j({ elements: [
+      way(11, SITE.lon + dLon(25), SITE.lat + dLat(20), 40, 30, { amenity: 'parking', parking: 'surface', access: 'customers' }),
+      way(12, SITE.lon + dLon(150), SITE.lat - dLat(60), 60, 30, { amenity: 'parking', parking: 'surface', name: 'Park & Ride', capacity: '26' }),
+      way(13, SITE.lon - dLon(10), SITE.lat, 8, 60, { amenity: 'parking', parking: 'street_side' }),
+      { type: 'node', id: 21, lat: SITE.lat + dLat(1300), lon: SITE.lon, tags: { amenity: 'social_facility', social_facility: 'shelter', 'social_facility:for': 'homeless' } },
+      // Shelters for abuse victims, and women-only ones not tagged for homelessness, must never be used.
+      { type: 'node', id: 22, lat: SITE.lat + dLat(300), lon: SITE.lon, tags: { amenity: 'social_facility', social_facility: 'shelter', 'social_facility:for': 'abused' } },
+      { type: 'node', id: 23, lat: SITE.lat - dLat(250), lon: SITE.lon, tags: { amenity: 'social_facility', social_facility: 'shelter', 'social_facility:for': 'women' } },
+      { type: 'node', id: 31, lat: SITE.lat + dLat(6000), lon: SITE.lon - dLon(1000), tags: { highway: 'motorway_junction', ref: '142' } }
+    ] });
+  }
+  // Valhalla: the site evaluation asks for 10, 15 and 20 minutes at once
+  if (host.startsWith('valhalla') && /"time":20/.test(postData || '')) {
+    siteHit('valhalla');
+    if (site.fail.has('valhalla')) return down;
+    const body = JSON.parse(postData), { lat, lon } = body.locations[0];
+    return j({ features: body.contours.map(c => ({ type: 'Feature', properties: { contour: c.time },
+      geometry: { type: 'Polygon', coordinates: [box(lon, lat, c.time * 0.0042 / Math.cos(lat * Math.PI / 180), c.time * 0.004)] } })) });
+  }
+  return null;
+}
+// A stop and a route by the site, returned only to queries whose envelope covers it.
+function coversSite(u) {
+  const g = (u.searchParams.get('geometry') || '').split(',').map(Number);
+  return g.length === 4 && g[0] <= SITE.lon && g[2] >= SITE.lon && g[1] <= SITE.lat && g[3] >= SITE.lat;
+}
+const SITE_STOP = { type: 'Feature', properties: { stop_name: 'SR 285 & Fifth St', stop_id: 'LT_9001' }, geometry: { type: 'Point', coordinates: [SITE.lon - 0.0006, SITE.lat + 0.0007] } };
+const SITE_ROUTE = { type: 'Feature', properties: { route_type: 3, route_short_name: '1', route_long_name: 'Downtown - North End', agency_name: 'Link Transit' }, geometry: lineNearSite(-0.0006) };
+
 // CDN assets served from the exact local npm tarball bytes (SRI must pass)
 const PKGS = (process.env.PKGS_DIR || './node_modules').replace(/\/$/, '') + '/';
 const CDN_FILES = {
@@ -174,6 +333,8 @@ function handle(url, method, postData) {
     if (CDN_FILES[name]) return { path: CDN_FILES[name][0], contentType: CDN_FILES[name][1], headers: { 'Access-Control-Allow-Origin': '*' } };
     return { status: 404, contentType: 'text/plain', body: 'unknown cdn file' };
   }
+  const siteRes = siteMock(u, method, postData);
+  if (siteRes) return siteRes;
 
   // Census API
   if (u.hostname === 'api.census.gov') {
@@ -246,8 +407,8 @@ function handle(url, method, postData) {
       type: 'Feature Layer', maxRecordCount: 2000,
       fields: [{ name: 'stop_id', type: 'esriFieldTypeString' }, { name: 'stop_name', type: 'esriFieldTypeString' }]
     });
-    if (full.includes('FeatureServer/3/query')) return jsonRes(WSDOT_ROUTES);
-    if (full.includes('FeatureServer/1/query')) return jsonRes(WSDOT_STOPS);
+    if (full.includes('FeatureServer/3/query')) return jsonRes(coversSite(u) ? { type: 'FeatureCollection', features: WSDOT_ROUTES.features.concat([SITE_ROUTE]) } : WSDOT_ROUTES);
+    if (full.includes('FeatureServer/1/query')) return jsonRes(coversSite(u) ? { type: 'FeatureCollection', features: WSDOT_STOPS.features.concat([SITE_STOP]) } : WSDOT_STOPS);
     if (full.includes('FerryRoutes/MapServer?f=json')) return jsonRes({ layers: [{ id: 0, name: 'Ferry Routes' }] });
     if (full.includes('FerryRoutes/MapServer/0/query')) return jsonRes({
       type: 'FeatureCollection',
@@ -327,7 +488,7 @@ assert(await page.evaluate(() => WAMAP.CONFIG.BASEMAPS.every(b => /^https:/.test
 assert(await page.evaluate(() => WAMAP.CONFIG.BASEMAPS.filter(b => /arcgis/.test(b.url)).every(b => /\/tile\/\{z\}\/\{y\}\/\{x\}$/.test(b.url))), 'ArcGIS services use the {z}/{y}/{x} row-major tile order');
 assert(!bmHosts.some(h => h.includes('cartocdn')), 'no CARTO tiles (they now require an API key)');
 assert(!(await page.evaluate(() => WAMAP.CONFIG.BASEMAPS.some(b => /\{apikey\}|\bkey=/.test(b.url)))), 'no base map needs an API key');
-assert(await page.locator('.layer-card').count() === 7, '7 layer cards rendered');
+assert(await page.locator('.layer-card').count() === 8, '8 layer cards rendered');
 
 console.log('· demographics (county level)');
 await setToggle('card-demographics', true);
@@ -1233,6 +1394,164 @@ console.log('· radius & area search');
   await page.waitForTimeout(1200);
 }
 
+const mapPoint = ll => page.evaluate(([lat, lon]) => {
+  const q = WAMAP.map.latLngToContainerPoint([lat, lon]), r = document.getElementById('map').getBoundingClientRect();
+  return { x: r.left + q.x, y: r.top + q.y };
+}, ll);
+
+console.log('· zoning layer');
+{
+  // Real amenity and crime markers near the site would catch the clicks on
+  // zones and the pin drop below; the evaluation reads the amenity files either way.
+  await setToggle('card-amenities', false);
+  await setToggle('card-crime', false);
+  await setToggle('card-zoning', true);
+  await page.waitForTimeout(400);
+  assert(!(await page.locator('#card-insurance .card-toggle input').isChecked()), 'enabling zoning switched the insurance choropleth off (one area layer at a time)');
+  await page.evaluate(() => { WAMAP.map.setView([47.35, -120.7], 7, { animate: false }); });
+  await page.waitForTimeout(500);
+  assert(/Zoom in to see zoning/.test(await page.locator('#card-zoning .status-line').textContent()), 'below zoom 13 the zoning card asks to zoom in');
+  assert(await page.locator('.legend-block[data-layer="zoning"]').isVisible(), 'zoning legend visible');
+  const cellsBefore = site.hits.zoneCells || 0;
+  await page.evaluate(p => { WAMAP.map.setView([p.lat, p.lon], 15, { animate: false }); }, SITE);
+  await page.waitForFunction(() => /zones in view/.test(document.querySelector('#card-zoning .status-line').textContent), null, { timeout: 8000 }).catch(() => {});
+  const zStatus = (await page.locator('#card-zoning .status-line').textContent()).trim();
+  const drawn = await page.evaluate(() => WAMAP.zoning.drawn());
+  const byZone = Object.fromEntries(drawn.map(d => [d.zone, d]));
+  const CATS = await page.evaluate(() => Object.fromEntries(WAMAP.CONFIG.ZONING.categories.map(c => [c.id, c.color])));
+  assert(/^5 zones in view · Wenatchee, Unincorporated Chelan County$/.test(zStatus), `zones load per grid cell at zoom 15, city and county: "${zStatus}"`);
+  assert(byZone.CC && byZone.CC.cat === 'MXU' && byZone.CC.fill === CATS.MXU && byZone.R6.cat === 'LIR' && byZone.PUB.cat === 'PUB' && byZone.RR5.cat === 'RUR',
+    'zones are coloured by the atlas class: ' + drawn.map(d => d.zone + ':' + d.cat).join(', '));
+  assert(byZone['C-2'] && byZone['C-2'].cat === 'COM', 'a zone the atlas has not classed takes a class from its name (General Business: commercial)');
+  assert((site.hits.zoneCells || 0) > cellsBefore && drawn.every(d => d.lvl === 'f'), 'zoom 15 fetches the fine geometry');
+  const cellsNow = site.hits.zoneCells;
+  await page.evaluate(() => { WAMAP.map.panBy([160, 0], { animate: false }); WAMAP.map.panBy([-160, 0], { animate: false }); });
+  await page.waitForTimeout(700);
+  assert(site.hits.zoneCells === cellsNow, 'panning back over loaded cells fetches nothing again');
+  const zp = await mapPoint([SITE.lat + 0.0006, SITE.lon + 0.0012]);
+  await page.mouse.click(zp.x, zp.y);
+  await page.waitForFunction(() => /Office parking minimum/.test((document.querySelector('.leaflet-popup-content') || {}).textContent || ''), null, { timeout: 5000 }).catch(() => {});
+  const popText = (await page.locator('.leaflet-popup-content').textContent().catch(() => '')).replace(/\s+/g, ' ');
+  assert(/Community Commercial CC/.test(popText) && /Wenatchee · Mixed Use · Mixed-use Low-rise/.test(popText), 'a zone popup names the zone, its jurisdiction and class: ' + popText.slice(0, 120));
+  assert(/Medical office: Office uses, which in most codes include medical offices and clinics, are permitted outright/.test(popText) && /Office\s*✓ Permitted/.test(popText),
+    'the popup states the medical-office outlook from the office-use code');
+  assert(/Max height\s*45 ft/.test(popText) && /Office parking minimum\s*3 per 1,000 sf/.test(popText) && /Downtown design review overlay/.test(popText) && /Design review applies along SR 285/.test(popText),
+    'the popup lists standards, overlays and notes');
+  const zLinks = await page.locator('.leaflet-popup-content a').evaluateAll(as => as.map(a => a.href));
+  assert(zLinks.some(h => /example\.org\/code\/wenatchee\/zoning/.test(h)) && zLinks.some(h => /commerce\.wa\.gov/.test(h)), 'the popup links the code chapter and the atlas');
+  await page.evaluate(() => { WAMAP.map.closePopup(); });
+  await page.locator('#card-zoning select.input').selectOption('office');
+  await page.waitForTimeout(300);
+  const office = Object.fromEntries((await page.evaluate(() => WAMAP.zoning.drawn())).map(d => [d.zone, d]));
+  const OUT = await page.evaluate(() => Object.fromEntries(WAMAP.CONFIG.ZONING.outlook.map(o => [o.id, o.color])));
+  assert(office.CC.fill === OUT.P && office.R6.fill === OUT.X && office['C-2'].fillOpacity === 0 && !!office['C-2'].dash,
+    'office colouring: permitted, not permitted, and unrecorded left unfilled with a dashed edge');
+  assert(/Office & medical use/.test(await page.locator('.legend-block[data-layer="zoning"]').textContent()), 'the legend follows the colouring');
+  assert(/zmode=office/.test(await page.evaluate(() => { WAMAP.urlState.updateNow(); return location.hash; })), 'the link keeps the office colouring');
+  await page.locator('#card-zoning select.input').selectOption('category');
+}
+
+console.log('· medical site evaluation');
+{
+  await page.evaluate(() => { WAMAP.modes.cancel(); });
+  await page.locator('#pin-mode-btn').click();
+  assert(await page.evaluate(() => WAMAP.modes.active === 'pin'), 'pin mode is on');
+  const sp = await mapPoint([SITE.lat, SITE.lon]);
+  await page.mouse.click(sp.x, sp.y);
+  await page.evaluate(() => { WAMAP.modes.cancel(); });
+  await page.waitForTimeout(300);
+  assert(await page.locator('.user-pin').count() === 1, 'a click in pin mode drops a pin over a zone, without opening the zone popup');
+  await page.locator('.user-pin').last().click();
+  await page.waitForTimeout(300);
+  const evalBtn = page.locator('.leaflet-popup-content button', { hasText: 'Evaluate for medical use' });
+  assert(await evalBtn.count() === 1, 'a pin popup offers "Evaluate for medical use"');
+  await evalBtn.click();
+  const waitDone = async () => {
+    for (let i = 0; i < 60; i++) {
+      await page.waitForTimeout(400);
+      const r = await page.evaluate(() => WAMAP.siteEval.result());
+      if (r && !r.res.loading) return r;
+    }
+    return page.evaluate(() => WAMAP.siteEval.result());
+  };
+  let r = await waitDone();
+  assert(await page.locator('#site-eval').isVisible(), 'the evaluation panel opens');
+  const C = id => r.res.criteria.find(c => c.id === id);
+  assert(Object.values(r.status).every(s => s === 'ok') && Object.keys(r.status).length === 10, 'all ten sources answered: ' + JSON.stringify(r.status));
+  assert(r.res.criteria.length === 11 && r.res.criteria.every(c => c.status === 'ok') && r.res.coverage === 100, 'all eleven criteria scored: ' + r.res.criteria.map(c => c.id + ':' + c.status).join(', '));
+  const weighted = Math.round(r.res.criteria.reduce((t, c) => t + c.w * c.score, 0) / 100);
+  assert(r.res.overall === weighted && r.res.rating === (weighted >= 80 ? 'Strong' : weighted >= 65 ? 'Good' : weighted >= 50 ? 'Fair' : 'Weak'),
+    `the overall score is the weighted average (${r.res.overall}, ${r.res.rating})`);
+  assert(C('zoning').score === 100 && /zoned Community Commercial \(CC\) in Wenatchee/.test(C('zoning').fact) &&
+    C('zoning').details.some(t => /own zoning map, queried live, shows the same zone \(CC\)/.test(t)), 'zoning: office permitted, confirmed against the city\'s live map');
+  assert(C('site').score === 90 && /2\.0-acre parcel has room for a 10,000 sf clinic and its 50 parking stalls/.test(C('site').fact) &&
+    C('site').details.some(t => /Parcel 000000000001, 100 EXAMPLE AVE, WENATCHEE: 1\.97 acres/.test(t)) && C('site').details.some(t => /about 40 stalls in 1 lot/.test(t)),
+    'parking & site: parcel area against the land needed, and the customer lot on the parcel: ' + C('site').details.join(' | '));
+  assert(!site.ownerAsked, 'the parcel query never asks for owner fields');
+  assert(C('access').score === 93 && /120 ft from SR 285, a principal arterial carrying about 14,000 vehicles a day/.test(C('access').fact), 'arterials: functional class, traffic count and interchange distance: ' + C('access').fact);
+  assert(C('transit').score > 0 && /1 transit stop within a quarter mile, served by 1 route/.test(C('transit').fact), 'transit: the stop and route by the site: ' + C('transit').fact);
+  assert(C('shelters').score === 81 && /nearest shelter is 0\.8 mi away/.test(C('shelters').fact), 'shelters: distance only, and the abuse-victims and women-only shelters are never used: ' + C('shelters').fact);
+  assert(C('terrain').score === 95 && /slopes about 3%/.test(C('terrain').fact) && /outside FEMA's mapped floodplains/.test(C('terrain').fact), 'terrain: slope from USGS samples and the FEMA flood zone');
+  assert(/within a 10-minute drive/.test(C('demand').fact) && C('demand').details.some(t => /census tracts?\)/.test(t)), 'demand: residents within the 10-minute catchment');
+  assert(/employer or direct-purchase coverage/.test(C('payer').fact) && C('payer').details.some(t => /Payer mix within a 10-minute drive/.test(t)), 'payer mix of the catchment from the ACS');
+  assert(/rates (Strong|Good|Fair|Weak) \(\d+ of 100\) for a primary care clinic/.test(r.writeup) && /It is zoned Community Commercial/.test(r.writeup) &&
+    /In its favor: /.test(r.writeup) && /screening estimate/.test(r.writeup), 'the write-up states the rating, the zoning and the strengths: ' + r.writeup.slice(0, 160));
+  const overlayN = await page.evaluate(() => { let n = 0; WAMAP.map.eachLayer(l => { if (l.feature && l.feature.geometry && /Polygon/.test(l.feature.geometry.type) && l.options && l.options.interactive === false && l.options.dashArray === '6 5') n++; }); return n; });
+  assert(overlayN >= 1, 'the drive-time catchment is outlined on the map');
+  const report = await page.evaluate(() => WAMAP.siteEval.text());
+  assert(/Medical site evaluation: /.test(report) && r.res.criteria.every(c => report.includes(c.label)), 'the full report lists every criterion');
+  // use type and size
+  await page.locator('#site-eval select').selectOption('chc');
+  r = await page.evaluate(() => WAMAP.siteEval.result());
+  assert(C('transit').w === 14 && /for a community health center/i.test(r.writeup) && /rely on Medicaid or are uninsured/.test(r.res.criteria.find(c => c.id === 'payer').fact),
+    'a community health center weighs transit more and scores the Medicaid and uninsured share');
+  await page.locator('#site-eval select').selectOption('primary');
+  await page.locator('#site-eval .se-sqft').fill('40000');
+  await page.locator('#site-eval .se-sqft').dispatchEvent('change');
+  r = await page.evaluate(() => WAMAP.siteEval.result());
+  assert(r.res.criteria.find(c => c.id === 'site').score < 90 && /parcel is smaller than the roughly/.test(r.res.criteria.find(c => c.id === 'site').fact), 'a 40,000 sf building no longer fits the parcel');
+  await page.locator('#site-eval .se-sqft').fill('10000');
+  await page.locator('#site-eval .se-sqft').dispatchEvent('change');
+  // the city's own map shows another zone: scored on the current zone, which caps the rating
+  site.liveCode = 'R6';
+  await page.locator('#site-eval button', { hasText: 'Re-run' }).click();
+  r = await waitDone();
+  const z = r.res.criteria.find(c => c.id === 'zoning');
+  assert(z.score === 5 && r.res.rating === 'Weak' && r.res.gated && z.details.some(t => /shows R6, not the atlas's CC .*the score uses the city's current zone/.test(t)) && /caps the rating/.test(r.writeup),
+    'a rezone on the city\'s live map is scored and caps the rating: ' + z.details.join(' | '));
+  site.liveCode = 'CC';
+  // sources that fail: straight-line catchment, unscored criteria named
+  site.fail.add('valhalla'); site.fail.add('overpass'); site.fail.add('epqs');
+  await page.locator('#site-eval button', { hasText: 'Re-run' }).click();
+  r = await waitDone();
+  assert(/within 4 miles in a straight line/.test(r.res.criteria.find(c => c.id === 'demand').fact), 'without routing, the catchment is a straight-line radius');
+  assert(r.res.criteria.find(c => c.id === 'shelters').status === 'error' && /Not scored: .*shelters nearby/.test(r.writeup), 'without OpenStreetMap, shelters are not scored and the write-up says so');
+  assert((site.hits.openMeteo || 0) > 0 && /coarse estimate/.test(r.res.criteria.find(c => c.id === 'terrain').fact), 'without USGS, slope comes from the coarse elevation model and says so');
+  site.fail.clear();
+  // A traffic count is credited to the state route it was taken on, not to a nearer arterial.
+  const accessFact = await page.evaluate(() => {
+    const st = {};
+    for (const k of ['zoning', 'parcel', 'osm', 'roads', 'traffic', 'elevation', 'flood', 'transit', 'amenities', 'catchment']) st[k] = 'error';
+    st.roads = st.traffic = st.osm = 'ok';
+    const line = { type: 'LineString', coordinates: [[-122, 47], [-122, 47.01]] };
+    const run = { status: st, errors: {}, data: {
+      roads: { roads: [{ cls: 3, desc: 'Urban Other Principal Arterial', name: 'Main St', sr: null, d: 40, geometry: line },
+        { cls: 3, desc: 'Urban Other Principal Arterial', name: 'SR 285', sr: 'SR 285', d: 140, geometry: line }] },
+      traffic: { sections: [{ aadt: 14000, route: 'SR 285', year: 2025, d: 140 }] },
+      osm: { parking: [], shelters: [], junctions: [] } } };
+    return WAMAP.siteEvalInternals.evaluate(run, WAMAP.CONFIG.SITE_EVAL.profiles[0], 10000).criteria.find(c => c.id === 'access').fact;
+  });
+  assert(accessFact === 'it is 130 ft from Main St, a principal arterial, near SR 285 (about 14,000 vehicles a day)', 'a nearby state route\'s traffic count is not credited to the nearer arterial: ' + accessFact);
+  await page.locator('#site-eval .se-close').click();
+  assert(!(await page.locator('#site-eval').isVisible()) && !(await page.evaluate(() => WAMAP.siteEval.isOpen)), 'the panel closes');
+  await page.locator('#pin-clear-btn').click();
+  await setToggle('card-insurance', true);
+  await page.waitForTimeout(600);
+  assert(!(await page.locator('#card-zoning .card-toggle input').isChecked()), 'switching a choropleth on switches zoning off');
+  await setToggle('card-amenities', true);
+  await setToggle('card-crime', true);
+}
+
 console.log('· about modal');
 await page.locator('#about-btn').click();
 assert(await page.locator('#about-modal').isVisible(), 'sources modal opens');
@@ -1243,6 +1562,11 @@ assert(/Payer mix counts each person once/.test(await page.locator('#sources-con
   srcLinks.includes(`https://data.census.gov/table/ACSDT5Y${ACS_COUNTY.vintage}.B27010?g=040XX00US53`) &&
   srcLinks.some(h => /kff\.org/.test(h)) && srcLinks.some(h => /census\.gov\/topics\/health/.test(h)),
   'Sources & methodology explains the payer mix and links the ACS table, the Census glossary and KFF: ' + srcLinks.length + ' links');
+{
+  const txt = await page.locator('#sources-content').textContent();
+  assert(/Washington State Zoning Atlas/.test(txt) && /Medical site evaluation/.test(txt) && /No owner information is read/.test(txt) && srcLinks.some(h => /commerce\.wa\.gov/.test(h)),
+    'Sources & methodology documents the zoning atlas and the site evaluation\'s criteria');
+}
 await page.locator('#about-close').click();
 
 console.log('· base maps + label sandwich');

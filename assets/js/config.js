@@ -648,6 +648,199 @@
     listPage: 100               // result rows shown per group before "Show more"
   };
 
+  // ----------------------------------------------------------------- zoning
+  // Washington State Zoning Atlas (WA Department of Commerce): every city's
+  // zoning districts inside its limits and each county's zoning for its
+  // unincorporated land, normalized to one set of classes and allowed uses.
+  // Queried live (keyless, CORS-enabled); a city's zone wins over a county's
+  // where both cover a spot, and county zoning is the backup elsewhere.
+  const ZONING = {
+    service: 'https://services6.arcgis.com/tboeqGwETr5ppr5Q/arcgis/rest/services/WAZA_Prototype_Layers/FeatureServer',
+    layers: { zones: 0, overlays: 1, jurisdictions: 2 },
+    atlasUrl: 'https://www.commerce.wa.gov/growth-management/data-research/waza/',
+    minZoom: 13,
+    // Zones are fetched per grid cell (degrees of longitude, latitude) and
+    // kept, so panning back over an area costs nothing.
+    cellDeg: [0.05, 0.035],
+    maxCells: 80,
+    concurrency: 4,
+    // Line generalization (degrees) by zoom: coarse below 15, fine from 15.
+    offset: { coarse: 0.00008, fine: 0.00001 },
+    fields: 'OBJECTID,GEOID,Jurisdiction,ZoneID,ZoneName,WAZAZoneGeneral,WAZAZoneSpecific,UseOffice,UseRetail',
+    // A pin in a street (the atlas leaves rights-of-way unzoned) takes the
+    // nearest zone within this distance.
+    nearM: 30,
+    // The site evaluation also asks the jurisdiction's own zoning layer (the
+    // atlas records its URL and zone field) whether the zone still matches.
+    // Seattle's layer is listed without a field name in the atlas.
+    liveFieldOverrides: { '5363000': 'ZONING' },
+    // Map classes: the atlas's general classes, grouped into eight hues and a
+    // neutral. Conventional planning colours (LBCS: yellow residential, red
+    // commercial, purple industrial, blue public, green open space). Worst
+    // ALL-pairs separation: CVD ΔE 9.0, normal vision 15.2, lightness and
+    // chroma in band (dataviz validator; the yellow is below 3:1 on white, so
+    // the legend, tooltip and popup always name the class).
+    categories: [
+      { id: 'LIR', label: 'Low-intensity residential', classes: ['LIR'], color: '#c7b500' },
+      { id: 'MR', label: 'Multi-unit residential', classes: ['MR'], color: '#cf7604' },
+      { id: 'MXU', label: 'Mixed use', classes: ['MXU'], color: '#a75091' },
+      { id: 'COM', label: 'Commercial', classes: ['COM'], color: '#8c2c36' },
+      { id: 'IND', label: 'Industrial', classes: ['IND'], color: '#59419b' },
+      { id: 'PUB', label: 'Public & semi-public', classes: ['PUB'], color: '#0278c7' },
+      { id: 'OS', label: 'Parks & open space', classes: ['OS'], color: '#059f6d' },
+      { id: 'RUR', label: 'Rural & resource lands', classes: ['RUR', 'NRL'], color: '#7a6813' },
+      { id: 'OTHER', label: 'Military, tribal or unclassified', classes: ['MIL', 'TRB', 'UND', 'UNK'], color: '#a9aeac' }
+    ],
+    // The atlas's own labels (read live from the layer's domains; these are
+    // the fallback if that metadata cannot be loaded).
+    general: {
+      COM: 'Commercial', IND: 'Industrial', NRL: 'Natural resource lands', OS: 'Parks and open space',
+      PUB: 'Public and semi-public use', TRB: 'Tribal lands', UND: 'Undesignated', LIR: 'Low-intensity residential',
+      UNK: 'Unknown', RUR: 'Rural', MXU: 'Mixed use', MR: 'Multi-unit residential', MIL: 'Military lands'
+    },
+    // Zones the atlas has not classed get one from their name, marked as inferred.
+    infer: [
+      [/mixed|downtown|village|town cent|city cent|urban cent|\bmu\b|\bmxd?\b/i, 'MXU'],
+      [/industr|manufactur|warehouse|\bm-?\d\b|\bi-?\d\b|\bi-?[lmh]\b|\bli\b|\bhi\b|seaport|airport|aviation/i, 'IND'],
+      [/commerc|business|retail|office|shopping|\bc-?\d\b|\bcb\b|\bbn\b|\bgc\b|\bnc\b/i, 'COM'],
+      [/multi|apartment|high density|medium density|townhouse|\brm|\bmf|\br-?(1[2-9]|[2-9]\d)\b/i, 'MR'],
+      [/single|residential|\brs|\bsf\b|\bsr\b|\bllr|\br-?\d/i, 'LIR'],
+      [/park|open space|recreation|conservancy|greenbelt/i, 'OS'],
+      [/public|institution|school|civic|government|hospital|campus|cemetery|utility/i, 'PUB'],
+      [/agric|farm|forest|timber|mineral|mining|resource|rural/i, 'RUR']
+    ],
+    // Allowed-use codes, as the atlas records them for each zone.
+    uses: {
+      P: { label: 'Permitted', short: 'permitted' },
+      C: { label: 'Conditional', short: 'conditional use permit' },
+      LA: { label: 'Limited or accessory', short: 'limited or accessory only' },
+      X: { label: 'Not permitted', short: 'not permitted' },
+      U: { label: 'Unknown', short: 'not recorded' }
+    },
+    // "Office & medical use" colouring: where an office (the use class that
+    // takes medical offices) is allowed. All-pairs CVD ΔE 12.1 among the
+    // three hues; "not permitted" recedes as a light neutral, unknown is left
+    // unfilled with a dashed edge.
+    outlook: [
+      { id: 'P', label: 'Office use permitted', color: '#12814f' },
+      { id: 'C', label: 'Conditional use permit', color: '#dca118' },
+      { id: 'LA', label: 'Limited or accessory only', color: '#8f4a9a' },
+      { id: 'X', label: 'Not permitted', color: '#c9ced0' },
+      { id: 'U', label: 'Not recorded', color: null }
+    ],
+    fillOpacity: 0.55
+  };
+
+  // ------------------------------------------------------ site evaluation
+  // A screening score for a medical clinic at a dropped pin, from public
+  // data. The criteria follow a healthcare site search (demand and payer mix
+  // in the drive-time catchment, access and visibility, zoning, site capacity,
+  // competition and adjacency to other care) and add parking, shelters,
+  // amenities, transit, arterials and terrain. Each criterion scores 0-100 from
+  // the anchors below (straight lines between anchors; population on a log
+  // scale); the use type sets the weights (each set sums to 100) and the
+  // drive time that defines the catchment.
+  const SITE_EVAL = {
+    defaultSqft: 10000,
+    profiles: [
+      { id: 'primary', label: 'Primary care clinic', minutes: 10, parkingPer1000: 5,
+        weights: { zoning: 14, demand: 14, payer: 12, access: 12, transit: 8, site: 12, health: 8, amenities: 8, competition: 6, terrain: 4, shelters: 2 } },
+      { id: 'multi', label: 'Multispecialty or medical office', minutes: 20, parkingPer1000: 5.5,
+        weights: { zoning: 14, demand: 14, payer: 14, access: 12, transit: 6, site: 12, health: 12, amenities: 4, competition: 4, terrain: 5, shelters: 3 } },
+      { id: 'urgent', label: 'Urgent care', minutes: 10, parkingPer1000: 5,
+        weights: { zoning: 14, demand: 12, payer: 10, access: 18, transit: 6, site: 10, health: 6, amenities: 10, competition: 8, terrain: 4, shelters: 2 } },
+      { id: 'chc', label: 'Community health center (FQHC)', minutes: 15, parkingPer1000: 4,
+        weights: { zoning: 14, demand: 10, payer: 12, access: 8, transit: 14, site: 10, health: 8, amenities: 8, competition: 6, terrain: 4, shelters: 6 } }
+    ],
+    criteria: [
+      { id: 'zoning', label: 'Zoning', icon: '🏗️' },
+      { id: 'demand', label: 'Demand (population)', icon: '👥' },
+      { id: 'payer', label: 'Payer mix & income', icon: '💳' },
+      { id: 'access', label: 'Arterials & visibility', icon: '🛣️' },
+      { id: 'transit', label: 'Public transit', icon: '🚌' },
+      { id: 'site', label: 'Parking & site size', icon: '🅿️' },
+      { id: 'health', label: 'Hospitals & care nearby', icon: '🏥' },
+      { id: 'amenities', label: 'Amenities nearby', icon: '🛒' },
+      { id: 'competition', label: 'Competition', icon: '📊' },
+      { id: 'terrain', label: 'Elevation, slope & flood', icon: '⛰️' },
+      { id: 'shelters', label: 'Shelters nearby', icon: '🏠' }
+    ],
+    // Population anchors per use type: people within the catchment drive time.
+    demand: {
+      primary: [[2000, 10], [8000, 35], [20000, 60], [40000, 80], [70000, 100]],
+      multi: [[15000, 10], [50000, 35], [120000, 60], [250000, 80], [450000, 100]],
+      urgent: [[3000, 10], [10000, 35], [25000, 60], [50000, 80], [80000, 100]],
+      chc: [[5000, 10], [20000, 35], [50000, 60], [100000, 80], [180000, 100]]
+    },
+    // Straight-line fallback when drive times are unavailable (miles).
+    fallbackMiles: { primary: 4, multi: 10, urgent: 4, chc: 6 },
+    payer: {
+      commercial: [[35, 15], [45, 40], [55, 65], [62, 85], [70, 100]],   // % employer + direct-purchase
+      income: [[45000, 15], [65000, 40], [85000, 65], [110000, 85], [140000, 100]],
+      medicare: [[8, 30], [14, 60], [20, 85], [26, 100]],               // % Medicare incl. dual (multispecialty)
+      need: [[10, 15], [18, 40], [26, 65], [34, 85], [42, 100]]         // % Medicaid + uninsured (FQHC)
+    },
+    access: {
+      // metres to the nearest road of each federal functional class (WSDOT)
+      byClass: {
+        1: [[60, 70], [250, 55], [800, 35]],                       // interstate: visible, but no direct access
+        2: [[30, 100], [100, 85], [250, 65], [500, 45], [800, 30]], // freeway / expressway
+        3: [[30, 100], [100, 85], [250, 65], [500, 45], [800, 30]], // other principal arterial
+        4: [[30, 85], [100, 72], [250, 55], [500, 38], [800, 25]],  // minor arterial
+        5: [[30, 65], [100, 55], [250, 40], [500, 25]],             // major collector
+        6: [[30, 50], [100, 40], [250, 28]]                         // minor collector
+      },
+      none: 15,
+      freeway: [[1600, 100], [4000, 75], [8000, 45]],   // metres to the nearest freeway interchange
+      freewayNone: 20,
+      aadtBonus: [[10000, 3], [20000, 6], [40000, 10]]   // vehicles a day on a state route within 150 m
+    },
+    transit: { nearStop: 45, farStop: 25, perRoute: 8, routesMax: 35, rail: 20 },
+    site: {
+      stallSqft: 325,        // a surface stall with its share of aisles (planning rule of thumb: 300-350 sf)
+      overhead: 1.35,        // setbacks, landscaping and circulation on top of building + parking
+      oneStoryMaxSqft: 20000,
+      fit: [[0.3, 10], [0.6, 40], [0.85, 70], [1, 85], [1.5, 100]],       // parcel area / land needed
+      parking: [[0, 15], [0.5, 55], [1, 90], [1.3, 100]]                  // mapped stalls / stalls needed
+    },
+    health: {
+      hospitalM: [[1600, 100], [5000, 75], [10000, 50], [20000, 28], [40000, 10]],
+      clinics: [[0, 15], [2, 40], [5, 65], [10, 85], [20, 100]],          // within 1 mile
+      pharmacies: [[0, 20], [1, 70], [3, 100]]
+    },
+    amenities: {
+      retail: [[0, 15], [3, 45], [10, 70], [25, 90], [50, 100]]           // restaurants + shops within 1/2 mile
+    },
+    // Same-type providers per 10,000 residents of the catchment.
+    competition: {
+      primary: [[0.5, 100], [1.5, 80], [3, 55], [6, 30], [10, 15]],
+      multi: [[1, 100], [3, 75], [6, 50], [10, 30]],
+      urgent: [[0, 100], [0.2, 80], [0.5, 55], [1, 30], [2, 15]],
+      chc: [[0, 100], [1, 75], [3, 45], [6, 20]]                          // per 10,000 Medicaid/uninsured residents
+    },
+    terrain: {
+      slope: [[2, 100], [5, 85], [8, 60], [12, 35], [18, 15]],            // % grade across 50 m around the pin
+      sfhaCap: 25,           // a pin in the 1%-annual-chance floodplain scores at most this
+      moderatePenalty: 15    // 0.2%-annual-chance floodplain
+    },
+    shelters: {
+      privateM: [[200, 30], [400, 45], [800, 65], [1600, 90], [3200, 100]],
+      chcM: [[800, 100], [1600, 80], [3200, 60]], chcNone: 45
+    },
+    ratings: [[80, 'Strong'], [65, 'Good'], [50, 'Fair'], [0, 'Weak']],
+    endpoints: {
+      parcels: 'https://services.arcgis.com/jsIt88o09Q0r1j8h/arcgis/rest/services/Current_Parcels/FeatureServer/0',
+      parcelsInfo: 'https://geo.wa.gov/maps/2b603a599a0842a3b2284c04c8927f35',
+      functionalClass: 'https://data.wsdot.wa.gov/arcgis/rest/services/FunctionalClass/WSDOTFunctionalClassData/FeatureServer',
+      trafficSections: 'https://data.wsdot.wa.gov/arcgis/rest/services/Shared/TrafficData/FeatureServer/1',
+      epqs: 'https://epqs.nationalmap.gov/v1/json',
+      openMeteo: 'https://api.open-meteo.com/v1/elevation',
+      flood: 'https://hazards.fema.gov/arcgis/rest/services/public/NFHL/MapServer/28'
+    },
+    radii: { parkingM: 200, sheltersM: 3219, junctionsM: 8047, roadsM: 800, trafficM: 150,
+      stopNearM: 400, stopFarM: 800, amenityNearM: 805, amenityFarM: 1609, slopeM: 50, parcelM: 25 }
+  };
+
   // ---------------------------------------------------------------- sources
   const SOURCES = [
     { section: 'Demographics', items: [
@@ -697,6 +890,20 @@
       'Circle radii are great-circle distances from the pin. Polygon edges are straight lines on the map (Web Mercator), and containment is tested on that same projection, so the list matches the shape as drawn. Areas and perimeters are geodesic estimates.',
       'Amenities are points (a park is its representative point, not its boundary). Shapes, their styles and their names are stored only in this browser; the CSV export downloads the current list.'
     ]},
+    { section: 'Zoning', items: [
+      'Washington State Zoning Atlas (WAZA), Washington State Department of Commerce, queried live: the zoning districts of cities inside their limits and of counties on their unincorporated land (zones for 278 of the state\'s 320 cities, towns and counties; most of the rest are small towns with only a paper map, which the popup links), with each zone\'s local code and name, a normalized class, whether office, retail, residential and industrial uses are permitted, conditional, limited or not permitted, and development standards (height, floor area ratio, lot coverage, parking minimums). Where a city\'s zone and a county\'s overlap, the city\'s is used; the county\'s zoning is the backup where the atlas has none for the city. Streets are unzoned in the atlas, so a point in a right-of-way takes the nearest zone within 30 m.',
+      'The map colours zones by the atlas\'s general class, grouped into eight classes plus "military, tribal or unclassified" (conventional planning colours: yellow residential, red commercial, purple industrial, blue public, green open space). About 3,000 zones the atlas has not classed get a class from their name, marked as inferred in the popup. The "office & medical use" colouring shows where the atlas records office uses (the use class most codes put medical offices in) as permitted, conditional, limited or not permitted.',
+      'The atlas compiles each jurisdiction\'s code as of 2024-2025 and is not an official zoning map: popups link the zone\'s code chapter and the municipal code, and the site evaluation also asks the city\'s own zoning map (where the atlas records one that answers) whether the zone has changed. Always confirm zoning with the jurisdiction.'
+    ], links: [
+      { label: 'Washington State Zoning Atlas (WA Commerce)', url: 'https://www.commerce.wa.gov/growth-management/data-research/waza/' }
+    ]},
+    { section: 'Medical site evaluation', items: [
+      'Opened from a dropped pin, it scores the spot for a medical clinic from public data, 0-100 on each of eleven criteria, weighted by use type (primary care, multispecialty or medical office, urgent care, community health center; each set of weights sums to 100). The criteria follow a typical healthcare site search (demand and payer mix in the drive-time catchment, access and visibility, zoning, site capacity, competition and adjacency to other care) and add parking, shelters, amenities, transit, arterials and terrain. The overall score is the weighted average: Strong 80+, Good 65-79, Fair 50-64, Weak below 50. A criterion whose data could not be loaded is left out and the others reweighted, and the panel says how much of the weight was scored. A zoning score of 10 or less (neither offices nor retail permitted, or a low-density residential or open-space zone with no recorded uses) caps the rating at Weak.',
+      'Zoning: the atlas\'s office-use permission (permitted 100, conditional 60, limited 35, not permitted 5, or 25 where retail and services are permitted), else a typical value for the zone class. Demand: residents of census tracts whose internal point lies within the drive time (10 minutes for primary and urgent care, 15 for a health center, 20 for multispecialty; Valhalla routing over OpenStreetMap, straight-line circles if routing is down), scored on a log scale. Payer mix & income: employer plus direct-purchase coverage (60%) and population-weighted median household income (40%); multispecialty adds Medicare share; a health center scores its Medicaid and uninsured share instead (ACS 5-year tables B27010, C27007, B19013).',
+      'Arterials & visibility: distance to the nearest road of each federal functional class (WSDOT), plus up to 10 points for the annual average daily traffic on a state route within 150 m (WSDOT traffic counts) and a quarter of the score from distance to the nearest freeway interchange (OpenStreetMap). Transit: stops within a quarter and half mile, routes within a quarter mile and rail within half a mile (WSDOT statewide GTFS). Parking & site size: the parcel\'s area (Washington statewide tax parcels) against the land a building of the entered size needs with surface parking (one story up to 20,000 sf and two above; stalls at the use type\'s ratio or the zone\'s office minimum if higher, 325 sf per stall, plus 35% for setbacks and landscaping), 60%, and mapped parking on the parcel or within 400 ft against the stalls needed (OpenStreetMap; stall counts estimated from lot area where not tagged), 40%. A vacant parcel (undeveloped land use, or no building value) is scored on its area alone. No owner information is read.',
+      'Hospitals & care nearby: distance to the nearest hospital, clinics and practices within a mile and pharmacies within a mile (the amenities layer\'s registries and OpenStreetMap). Amenities: a grocery store within half a mile or a mile, restaurants and shops within half a mile, a bank within a mile. Competition: same-type providers in the catchment per 10,000 residents (per 10,000 Medicaid or uninsured residents for a health center); private practices are undercounted in open data, so this carries a small weight. Terrain: ground slope across 50 m around the pin (USGS 3DEP via the Elevation Point Query Service; a 90 m model if it is down) and the FEMA flood zone (a pin in the 1% annual chance floodplain scores at most 25). Shelters: distance to the nearest shelter for people experiencing homelessness (OpenStreetMap; closer scores lower for private clinics and higher for a health center, with a small weight). Shelters that may serve abuse victims or minors (tagged for them, or women-only and not tagged for homelessness) are never used, and only distances are shown.',
+      'The write-up states the rating, the zoning and the strongest and weakest criteria in plain sentences, and lists anything that could not be scored. This is a screening estimate, not an appraisal, a market study or a zoning determination: confirm zoning, the parcel, access and utilities with the jurisdiction and a site visit.'
+    ]},
     { section: 'Base maps', items: [
       '16 base maps, all keyless and free to use: OpenStreetMap and OSM Humanitarian; Esri Light/Dark Gray Canvas, World Imagery, Streets and Topographic; USGS The National Map (Imagery, Imagery+Topo, Topo, Shaded Relief, Hydrography); OpenTopoMap; OPNVKarte transit; CyclOSM; and WSDOT\'s Washington base map.',
       'Licensing, in plain terms: the USGS National Map services are U.S. federal works in the public domain with no commercial-use restriction - the cleanest option here, and the reason they are offered alongside the commercial alternatives. The Esri services at server.arcgisonline.com are keyless but are legacy raster layers in Esri Mature Support (cartography frozen around 2021, World Imagery excepted and still maintained); an organisation with an ArcGIS entitlement should point these at its own keyed basemap service. OpenStreetMap and the community servers (OSM France, OpenTopoMap, MeMoMaps) are volunteer-funded and ask that heavy or commercial traffic not lean on them.',
@@ -713,7 +920,7 @@
 
   WAMAP.CONFIG = {
     PALETTE, MAP, BASEMAPS, BASEMAP_GROUPS, LABEL_LAYERS, CENSUS, TIGERWEB, DEMO_METRICS, INSURANCE_METRICS,
-    INSURANCE, GEOCODE, OVERPASS, AMENITIES, AMENITIES_DEFAULT_ON, AMENITY_DATA_DIR, TRANSIT, CRIME, ISOCHRONE, AREAS, SOURCES,
+    INSURANCE, GEOCODE, OVERPASS, AMENITIES, AMENITIES_DEFAULT_ON, AMENITY_DATA_DIR, TRANSIT, CRIME, ISOCHRONE, AREAS, ZONING, SITE_EVAL, SOURCES,
     SQMI_PER_SQM
   };
 })();

@@ -1,8 +1,8 @@
 # Washington Explorer
 
 An interactive mapping app for Washington state: demographics, health-insurance coverage,
-amenities, transit, crime, and 5/10/15-minute drive-time analysis from public, authoritative
-data sources. Pure static site (Leaflet + vanilla JS, no front-end build step) on GitHub
+city and county zoning, amenities, transit, crime, 5/10/15-minute drive-time analysis and a
+medical site evaluation for any dropped pin, from public, authoritative data sources. Pure static site (Leaflet + vanilla JS, no front-end build step) on GitHub
 Pages; a scheduled GitHub Action pre-builds the statewide datasets into `data/`.
 
 **Live site:** https://justin-tran1.github.io/washington-state-demographics/ (once this is merged
@@ -23,6 +23,8 @@ app is relative, so it works unchanged at either location.
 | Pin dropping | Pin mode (Esc to exit), draggable pins, reverse-geocoded labels, persisted in `localStorage` |
 | Demographics layer | Choropleth by county (statewide) or census tract (zoom 9+): population density, total population, median household income, median age, % bachelor's+, median home value, median gross rent, poverty rate, unemployment, owner-occupancy. Click any area for a full profile |
 | Health-insurance layer | Uninsured and insured rates, the **payer mix** (employer-sponsored, direct-purchase, Medicare, Medicaid incl. dual eligibles, military, other combinations, uninsured; each person counted once, grouped the way KFF does) and the **insurance sources** (private, employer-based, direct-purchase, TRICARE, public, Medicare, Medicaid/means-tested, VA; alone or with other coverage), mapped by county and tract. Clicking an area shows its payer mix bar and source bars, each figure linked to its ACS table on data.census.gov |
+| Zoning layer | Every city's zoning inside its limits and county zoning on unincorporated land (the county's is the backup where a city has none), from the Washington State Zoning Atlas, drawn from zoom 13. Colour by zone class or by whether office (medical) use is permitted, conditional, limited or not permitted. A zone's popup gives its code and name, allowed uses, height, FAR, lot coverage and parking minimums, overlays, and links to the code chapter |
+| Medical site evaluation | "Evaluate for medical use" on any pin (or search result) opens a panel that scores the spot 0-100 for a primary care clinic, multispecialty or medical office, urgent care or community health center, at the building size you enter: zoning (checked against the city's own live zoning map where it answers), demand and payer mix in the drive-time catchment, arterial access and traffic, transit, parcel size and parking, nearby hospitals and care, amenities, competition, slope and flood zone, and nearby shelters. It writes a short summary of strengths and watch-outs, outlines the parcel and catchment on the map, and copies as text |
 | Amenities layer | Schools, colleges, grocery, restaurants/cafes, retail, pharmacies, hospitals/clinics, banks/credit unions, fuel/EV charging, parks/playgrounds — every category loaded statewide (no per-view caps or zoom limits), authoritative registries merged with OpenStreetMap; hospitals always visible and never clustered |
 | Transit layer | Statewide routes and stops from WSDOT's consolidated GTFS (all WA agencies), styled by mode (bus, light rail/streetcar, rail, ferry), plus WSF ferry routes. Route popups link to the agency website and the route's schedule page |
 | Crime layer | Statewide: every agency's annual NIBRS offense totals (WASPC), sized by offenses and colored by rate per 1,000. Incident level: Seattle, Tacoma, Bellevue, Redmond, Kirkland, Everett, Yakima, Pierce County Sheriff, King County Sheriff and Auburn. Per-category filters, 30/90/180/365-day ranges, clustered points or heat map, live in-view counts |
@@ -58,6 +60,8 @@ what each step fetched.
 | Crime — statewide | [WASPC Crime in Washington](https://data.wa.gov/Public-Safety/Washington-State-Uniform-Crime-Reporting-National-/vvfu-ry7f) (NIBRS, OFM on data.wa.gov) → `data/crime/agencies.json` | Every agency; placed on its Census place (city police) or county (sheriff) |
 | Crime — incidents (live) | Seattle PD (Socrata), Tacoma PD, Bellevue PD, Redmond PD, Kirkland PD, Yakima PD, Pierce County Sheriff (ArcGIS), Everett PD (Socrata) | Queried from the browser; ArcGIS layers are asked only for configured columns |
 | Crime — incidents (pre-built) | King County Sheriff's Office, Auburn PD (Socrata) → `data/crime/` | Geocoded weekly with the Census batch geocoder at block level only: Auburn's exact addresses are generalized to the block, and its sex-offense, child-abuse, protection-order, stalking and kidnapping reports are withheld |
+| Zoning | [Washington State Zoning Atlas](https://www.commerce.wa.gov/growth-management/data-research/waza/) (WA Department of Commerce, live) | Zones for 278 of 320 cities, towns and counties with normalized classes, allowed uses and development standards; the site evaluation also queries the city's own zoning layer the atlas records (83 answer with CORS) to catch rezones since the atlas was compiled |
+| Site evaluation | [WA statewide tax parcels](https://geo.wa.gov/maps/2b603a599a0842a3b2284c04c8927f35), [WSDOT functional classification](https://data.wsdot.wa.gov/arcgis/rest/services/FunctionalClass) and [traffic counts](https://data.wsdot.wa.gov/arcgis/rest/services/Shared/TrafficData/FeatureServer), [USGS Elevation Point Query Service](https://epqs.nationalmap.gov/v1/docs) (Open-Meteo fallback), [FEMA National Flood Hazard Layer](https://hazards.fema.gov/), OpenStreetMap parking, shelters and interchanges (Overpass), plus the transit, amenity, ACS and drive-time sources above (all live) | Parcels are read for identity, size, land use and assessed values only, never owner fields; shelters that may serve abuse victims or minors are never used and only distances are shown. Weights and thresholds are in `SITE_EVAL` in `config.js` and written out in *Sources & methodology* |
 | Drive times | [Valhalla](https://github.com/valhalla/valhalla) routing engine on the public [FOSSGIS server](https://valhalla.openstreetmap.de) | Open-source isochrones over the OSM road network. Free keyless services model **typical** conditions, not live congestion — the UI says so explicitly |
 | Geocoding | [Esri World Geocoder](https://developers.arcgis.com/rest/geocode/) + [Nominatim](https://nominatim.org) | Esri answers keyless with CORS; the Census geocoder sends no CORS header, so browsers cannot use it |
 | Base maps | USGS The National Map, Esri ArcGIS Online, OpenStreetMap + community servers, WSDOT | All keyless; see the licensing section below |
@@ -81,6 +85,13 @@ Optional repository secrets: `CENSUS_API_KEY` (Census Data API instead of Summar
 - Crime points are reported offenses, not convictions; some records lack coordinates and are
   excluded (the layer says how many). In WASPC's statewide totals, theft includes
   motor-vehicle theft and fraud, and DUI / trespass (arrest-only offenses) are not counted.
+- Zoning comes from the state zoning atlas, compiled from each jurisdiction's code as of
+  2024-2025. It is not an official zoning map; popups link the code chapter, and the site
+  evaluation flags a zone that the city's own current map shows differently.
+- The site evaluation is a screening score, not an appraisal, market study or zoning
+  determination. Its competition counts undercount private practices (registries list
+  hospitals, health centers and surgery centers completely; practices come from OSM), and
+  mapped parking depends on OSM coverage.
 - Amenity points from different sources are de-duplicated two ways. The same name nearby:
   distinctive words must mostly agree (town names, health-system brands and store numbers do
   not count; unnamed places never match), and the radius widens for address-geocoded
@@ -98,7 +109,8 @@ index.html                 app shell + layer cards
 assets/css/app.css         design system (light + dark)
 assets/js/config.js        every endpoint, metric, category, palette token
 assets/js/util.js          fetch/ArcGIS/Socrata/Overpass/Census clients, geocoding, geometry
-assets/js/layers/          choropleth engine, amenities, transit, crime, drive time, radius & area search
+assets/js/layers/          choropleth engine, amenities, transit, crime, drive time, radius & area search,
+                           zoning, medical site evaluation
 data/                      pre-built datasets (acs/, geo/, amenities/, transit/, crime/, manifest.json)
 data/wa_counties.geojson   bundled county-boundary fallback
 scripts/build-data/        the data pipeline run by the "Build map data" Action (one module per dataset)
@@ -134,6 +146,8 @@ results:
 | Amenity pins (10) | CBRE chart hues | worst *adjacent* pair ΔE 15.7; all-pairs cannot pass at ten categories, so emoji + label carry identity |
 | Transit modes (5) | CBRE chart hues | adjacent pairs pass in both themes; each mode also has its own dash pattern |
 | Payer mix (5 payers + 2 neutrals) | CBRE chart hues, one hue per payer in both themes | adjacent stacked segments pass: worst CVD ΔE 18.9 / normal 19.3 light, 16.7 / 19.0 dark (military re-stepped for dark); "other" recedes and "uninsured" stands out as neutrals, and every value is listed beside the bar |
+| Zoning classes (8 + neutral) | Planning convention (LBCS: yellow residential, orange multifamily, magenta mixed use, red commercial, purple industrial, blue public, green open space, olive rural) | searched in OKLCH for the best **all-pairs** separation, since any two zones can touch on a map: worst CVD ΔE 9.0, normal 15.2, lightness and chroma in band; the yellow is under 3:1 on white, so the legend, tooltip and popup always name the class |
+| Office & medical use (3 + neutral) | green permitted / amber conditional / purple limited | all-pairs CVD ΔE 12.1; "not permitted" recedes as a light neutral and "not recorded" is left unfilled with a dashed edge |
 
 For sequential ramps the step nearest the surface is allowed to recede — in a sequential
 encoding that step means "near zero". Where the validator warns, the mitigation is real and
@@ -185,8 +199,9 @@ node scripts/build-data/index.mjs amenities    # one step: acs, boundaries, amen
 ## Attribution
 
 Basemaps © OpenStreetMap contributors, © Esri, USGS. Data: U.S. Census Bureau, NCES, CMS,
-HRSA, VHA, FDIC, NCUA, USDA FNS, NREL, USGS PAD-US, WA Department of Health, Washington State
-Parks, WSDOT, WASPC / OFM, the Seattle, Tacoma, Bellevue, Redmond, Kirkland, Everett, Yakima
+HRSA, VHA, FDIC, NCUA, USDA FNS, NREL, USGS PAD-US and 3DEP, FEMA, WA Department of Health,
+WA Department of Commerce (Washington State Zoning Atlas), the Washington statewide parcels
+project and county assessors, Washington State Parks, WSDOT, WASPC / OFM, the Seattle, Tacoma, Bellevue, Redmond, Kirkland, Everett, Yakima
 and Auburn police departments, the King County and Pierce County sheriffs, the Mobility
 Database, OpenStreetMap contributors (ODbL), Valhalla/FOSSGIS. This project is not affiliated
 with any of these providers.

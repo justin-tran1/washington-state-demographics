@@ -196,6 +196,13 @@
         U.el('div', { class: 'popup-actions' }, [
           U.el('button', { class: 'btn mini', text: '🚗 Drive times from here', onclick: () => { WAMAP.driveTime.setOrigin(r.lat, r.lon, r.label.split(',').slice(0, 2).join(',')); map.closePopup(); } }),
           U.el('button', { class: 'btn mini', text: '📌 Keep as pin', onclick: () => { addPin(r.lat, r.lon, r.label.split(',').slice(0, 3).join(',')); map.closePopup(); } }),
+          U.el('button', { class: 'btn mini', text: '🏥 Evaluate for medical use', title: 'Keep this address as a pin and score it for a medical clinic',
+            onclick: () => {
+              const id = addPin(r.lat, r.lon, r.label.split(',').slice(0, 3).join(','));
+              map.closePopup();
+              if (searchMarker) { map.removeLayer(searchMarker); searchMarker = null; }
+              if (WAMAP.siteEval) WAMAP.siteEval.open(id);
+            } }),
           U.el('button', { class: 'btn mini ghost', text: 'Remove marker', onclick: () => { map.removeLayer(searchMarker); searchMarker = null; } })
         ])
       ]);
@@ -228,6 +235,9 @@
         U.el('div', { class: 'popup-src', text: data.lat.toFixed(5) + ', ' + data.lon.toFixed(5) }),
         WAMAP.areas ? WAMAP.areas.pinPopupSection(id) : null,
         U.el('div', { class: 'popup-actions' }, [
+          WAMAP.siteEval ? U.el('button', { class: 'btn mini', text: '🏥 Evaluate for medical use',
+            title: 'Score this site for a medical clinic: zoning, parking and site, access, transit, demand, payer mix and more',
+            onclick: () => { map.closePopup(); WAMAP.siteEval.open(id); } }) : null,
           U.el('button', { class: 'btn mini', text: '🚗 Drive times from here', onclick: () => { WAMAP.driveTime.setOrigin(data.lat, data.lon, data.label || 'pin'); map.closePopup(); } }),
           U.el('button', { class: 'btn mini ghost', text: '🗑 Remove pin', onclick: () => removePin(id) })
         ])
@@ -308,6 +318,7 @@
       map, card: U.$('#card-insurance'),
       profile: WAMAP.insuranceProfile, popupOptions: { maxWidth: 360, minWidth: 300 }
     });
+    layers.zoning = WAMAP.createZoning({ map, card: U.$('#card-zoning') });
     layers.amenities = WAMAP.createAmenities({ map, card: U.$('#card-amenities') });
     layers.transit = WAMAP.createTransit({ map, card: U.$('#card-transit') });
     layers.crime = WAMAP.createCrime({ map, card: U.$('#card-crime') });
@@ -315,6 +326,8 @@
     layers.areas = WAMAP.createAreas({
       map, card: U.$('#card-areas'), amenities: layers.amenities, transit: layers.transit
     });
+    // The medical site evaluation opens from a pin's popup (not a layer card).
+    WAMAP.siteEval = WAMAP.createSiteEval({ map, amenities: layers.amenities, transit: layers.transit });
 
     for (const [id, inst] of Object.entries(layers)) {
       const card = U.$('#card-' + id);
@@ -352,6 +365,7 @@
       if (demoSel && demoSel.value !== CFG.DEMO_METRICS[0].id) parts.push('demo=' + demoSel.value);
       const insSel = U.$('#card-insurance select.input');
       if (insSel && insSel.value !== CFG.INSURANCE_METRICS[0].id) parts.push('ins=' + insSel.value);
+      if (layers.zoning.mode === 'office') parts.push('zmode=office');
       const origin = WAMAP.driveTime.getOrigin();
       if (origin) parts.push(`dt=${origin.lat.toFixed(5)},${origin.lon.toFixed(5)}`);
       return '#' + parts.join('&');
@@ -395,6 +409,7 @@
       };
       restoreSelect('demographics', st.demo);
       restoreSelect('insurance', st.ins);
+      if (st.zmode === 'office') layers.zoning.setMode('office');
       if (st.layers) {
         for (const id of st.layers.split(',')) {
           const t = U.$('#card-' + id + ' .card-toggle input');

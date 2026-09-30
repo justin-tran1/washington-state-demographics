@@ -520,6 +520,99 @@ select.input { cursor: pointer; }
 .ins-empty { font-size: 12.5px; margin: 4px 0; }
 .src-links { font-size: 12px; margin: 4px 0 10px; }
 
+/* zoning: popup, tooltip and legend */
+.swatch-open { background: transparent; border: 1.5px dashed var(--muted); }
+.z-detail { font-size: 12.5px; }
+.z-head { display: flex; gap: 8px; align-items: flex-start; margin-bottom: 6px; }
+.z-head .swatch { margin-top: 3px; }
+.z-name { font-weight: 700; font-size: 14px; color: var(--ink); }
+.z-code { font-weight: 600; font-size: 11.5px; color: var(--muted); font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+.z-sub { font-size: 11.5px; color: var(--ink-2); }
+.z-note { font-size: 11.5px; color: var(--ink-2); border-left: 3px solid var(--warning); padding-left: 7px; margin: 5px 0; }
+.z-med { border-left: 3px solid var(--baseline); padding: 4px 8px; margin: 6px 0; background: var(--plane); border-radius: 0 6px 6px 0; }
+.z-med-good { border-left-color: var(--good); }
+.z-med-fair { border-left-color: var(--warning); }
+.z-med-poor { border-left-color: var(--critical); }
+.z-uses, .z-std { width: 100%; border-collapse: collapse; margin-top: 6px; font-size: 12px; }
+.z-uses td, .z-std td { padding: 2px 4px; border-bottom: 1px solid var(--hairline); }
+.z-std td.num { text-align: right; font-variant-numeric: tabular-nums; }
+.z-use { white-space: nowrap; font-weight: 600; }
+.z-use-p { color: var(--good); }
+.z-use-c, .z-use-la { color: var(--warning); }
+.z-use-x { color: var(--critical); }
+.z-use-u { color: var(--muted); font-weight: 400; }
+.z-ovl, .z-info, .z-links { margin-top: 6px; font-size: 12px; color: var(--ink-2); }
+.z-links a, .z-detail .popup-src a, .z-detail a { color: var(--accent-ink); }
+.z-tip-j { color: var(--muted); font-size: 11px; }
+
+/* medical site evaluation panel */
+.se-panel {
+  position: absolute; top: 10px; right: 10px; bottom: 10px; width: 404px; max-width: calc(100% - 20px); z-index: 1150;
+  background: var(--surface); color: var(--ink); border: 1px solid var(--hairline); border-radius: 12px;
+  box-shadow: var(--shadow); overflow-y: auto; overscroll-behavior: contain;
+}
+#map-wrap.se-open #legend-host { right: 424px; }
+#map-wrap.se-open .leaflet-top.leaflet-right { right: 414px; }
+.se-head {
+  display: flex; justify-content: space-between; align-items: flex-start; gap: 8px; padding: 12px 14px 9px;
+  border-bottom: 1px solid var(--hairline); position: sticky; top: 0; background: var(--surface); z-index: 2;
+}
+.se-head-main { min-width: 0; }
+.se-kicker { font-size: 11px; font-weight: 700; color: var(--muted); text-transform: uppercase; letter-spacing: .06em; }
+.se-title { margin: 2px 0 1px; font-size: 15px; line-height: 1.3; overflow-wrap: anywhere; }
+.se-coords { font-size: 11.5px; color: var(--muted); }
+.se-coords a, .se-foot a, .se-src a { color: var(--accent-ink); }
+.se-close { flex: 0 0 auto; }
+.se-controls { display: flex; gap: 8px; padding: 10px 14px 2px; flex-wrap: wrap; }
+.se-ctl { display: flex; flex-direction: column; gap: 3px; flex: 1 1 150px; min-width: 0; }
+.se-ctl .input { width: 100%; flex: none; }
+.se-score { display: flex; gap: 12px; align-items: center; padding: 10px 14px 8px; }
+.se-num { font-size: 40px; font-weight: 800; line-height: 1; min-width: 66px; text-align: center; font-variant-numeric: tabular-nums; color: var(--muted); }
+.se-num.se-good { color: var(--good); }
+.se-num.se-fair { color: var(--warning); }
+.se-num.se-poor { color: var(--critical); }
+.se-score-side { flex: 1; min-width: 0; }
+.se-rating { font-weight: 700; font-size: 13px; }
+.se-bar { height: 8px; border-radius: 4px; background: var(--hairline); overflow: hidden; margin: 6px 0 4px; }
+.se-bar span, .se-cbar span { display: block; height: 100%; background: var(--muted); border-radius: 0 4px 4px 0; transition: width .25s ease; }
+.se-bar span.se-good, .se-good .se-cbar span { background: var(--good); }
+.se-bar span.se-fair, .se-fair .se-cbar span { background: var(--warning); }
+.se-bar span.se-poor, .se-poor .se-cbar span { background: var(--critical); }
+.se-cov { font-size: 11px; color: var(--muted); }
+.se-writeup { padding: 2px 14px 12px; border-bottom: 1px solid var(--hairline); }
+.se-h { font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); margin: 6px 0 5px; }
+.se-h small { text-transform: none; letter-spacing: 0; font-weight: 400; }
+.se-h-crit { padding: 6px 14px 0; margin-bottom: 0; }
+.se-writeup-text { margin: 0 0 9px; font-size: 13px; line-height: 1.55; color: var(--ink); }
+.se-actions { display: flex; gap: 6px; flex-wrap: wrap; }
+.se-criteria { padding: 0 10px 6px; }
+.se-crit { border-bottom: 1px solid var(--hairline); }
+.se-crit > summary {
+  display: grid; grid-template-columns: 20px minmax(0, 1fr) 32px 58px 46px; align-items: center; gap: 6px;
+  padding: 7px 4px; cursor: pointer; list-style: none; font-size: 12.5px;
+}
+.se-crit > summary::-webkit-details-marker { display: none; }
+.se-crit > summary:hover { background: var(--plane); }
+.se-icon { text-align: center; }
+.se-cname { font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.se-w { font-size: 11px; color: var(--muted); text-align: right; font-variant-numeric: tabular-nums; }
+.se-cbar { height: 6px; border-radius: 3px; background: var(--hairline); overflow: hidden; }
+.se-cscore { text-align: right; font-weight: 700; font-variant-numeric: tabular-nums; white-space: nowrap; }
+.se-good .se-cscore { color: var(--good); }
+.se-fair .se-cscore { color: var(--warning); }
+.se-poor .se-cscore { color: var(--critical); }
+.se-loading .se-cscore, .se-error .se-cscore, .se-na .se-cscore { color: var(--muted); font-weight: 400; }
+.se-cbody { padding: 0 6px 10px 30px; font-size: 12.5px; }
+.se-fact { color: var(--ink); margin-bottom: 4px; }
+.se-details { margin: 4px 0; padding-left: 16px; color: var(--ink-2); }
+.se-details li { margin-bottom: 3px; }
+.se-src { font-size: 11px; color: var(--muted); margin-top: 4px; }
+.se-miss { color: var(--muted); }
+.se-zone { margin: 6px 0; padding: 8px 9px; border: 1px solid var(--hairline); border-radius: 8px; }
+.se-showmap { padding: 8px 14px 2px; font-size: 12px; }
+.se-foot { padding: 6px 14px 14px; font-size: 11px; color: var(--muted); line-height: 1.45; }
+.se-copy-fallback { position: fixed; left: -9999px; top: 0; }
+
 /* file:// warning */
 .file-warning {
   background: var(--critical); color: #fff; padding: 8px 14px; font-size: 13px; z-index: 2000;
@@ -557,4 +650,8 @@ select.input { cursor: pointer; }
   #sidebar.open { transform: translateX(0); }
   #legend-host { max-width: 180px; bottom: 34px; }
   .brand-sub { display: none; }
+  /* the site evaluation becomes a bottom sheet */
+  .se-panel { top: auto; left: 0; right: 0; bottom: 0; width: auto; max-width: none; max-height: 72vh; border-radius: 12px 12px 0 0; }
+  #map-wrap.se-open #legend-host { right: 10px; display: none; }
+  #map-wrap.se-open .leaflet-top.leaflet-right { right: 0; }
 }

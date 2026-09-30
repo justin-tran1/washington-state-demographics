@@ -51,6 +51,19 @@ probe "everett police cases" GET 'https://data.everettwa.gov/resource/szww-y224.
 probe "pierce sheriff" GET "https://services2.arcgis.com/1UvBaQ5y1ubjUPmd/arcgis/rest/services/Crime_Data/FeatureServer/1?f=json"
 probe "yakima crimes" GET "https://services5.arcgis.com/drBwGNA3YMS2QPJd/arcgis/rest/services/Crimes_public_fc349e427d9945729c4e985666b31686/FeatureServer/0?f=json"
 
+# ---- Zoning and the medical site evaluation --------------------------------
+WAZA="https://services6.arcgis.com/tboeqGwETr5ppr5Q/arcgis/rest/services/WAZA_Prototype_Layers/FeatureServer"
+probe "zoning atlas zones (layer)" GET "$WAZA/0?f=json"
+probe "zoning atlas zone at a point" GET "$WAZA/0/query?geometry=-122.3331,47.6097&geometryType=esriGeometryPoint&inSR=4326&spatialRel=esriSpatialRelIntersects&outFields=ZoneID,WAZAZoneGeneral,UseOffice&returnGeometry=false&f=json"
+probe "zoning atlas jurisdictions" GET "$WAZA/2/query?where=1%3D1&returnCountOnly=true&f=json"
+probe "WA statewide parcels" GET "https://services.arcgis.com/jsIt88o09Q0r1j8h/arcgis/rest/services/Current_Parcels/FeatureServer/0/query?geometry=-122.3331,47.6097&geometryType=esriGeometryPoint&inSR=4326&spatialRel=esriSpatialRelIntersects&outFields=PARCEL_ID_NR,LANDUSE_CD,Shape__Area&returnGeometry=false&f=json"
+probe "WSDOT functional class" GET "https://data.wsdot.wa.gov/arcgis/rest/services/FunctionalClass/WSDOTFunctionalClassData/FeatureServer/1/query?geometry=-122.319,47.6205&geometryType=esriGeometryPoint&inSR=4326&spatialRel=esriSpatialRelIntersects&distance=250&units=esriSRUnit_Meter&outFields=FederalFunctionalClassCode,RoadName&returnGeometry=false&f=json"
+probe "WSDOT traffic sections" GET "https://data.wsdot.wa.gov/arcgis/rest/services/Shared/TrafficData/FeatureServer/1/query?geometry=-122.3470,47.6616&geometryType=esriGeometryPoint&inSR=4326&spatialRel=esriSpatialRelIntersects&distance=150&units=esriSRUnit_Meter&outFields=AADT&returnGeometry=false&f=json"
+probe "USGS elevation point query" GET "https://epqs.nationalmap.gov/v1/json?x=-122.3331&y=47.6097&wkid=4326&units=Feet&includeDate=false"
+probe "Open-Meteo elevation (fallback)" GET "https://api.open-meteo.com/v1/elevation?latitude=47.6097&longitude=-122.3331"
+probe "FEMA flood hazard zones" GET "https://hazards.fema.gov/arcgis/rest/services/public/NFHL/MapServer/28/query?geometry=-121.83,47.53&geometryType=esriGeometryPoint&inSR=4326&spatialRel=esriSpatialRelIntersects&outFields=FLD_ZONE,SFHA_TF&returnGeometry=false&f=json"
+probe "overpass (site evaluation)" POST "https://overpass-api.de/api/interpreter" 'data=%5Bout%3Ajson%5D%3Bnode(around%3A3000%2C47.6097%2C-122.3331)%5Bsocial_facility%3Dshelter%5D%3Bout%203%3B'
+
 # ---- Drive time / geocoding ----------------------------------------------
 probe "esri world geocoder" GET "https://geocode.arcgis.com/arcgis/rest/services/World/GeocodeServer/findAddressCandidates?SingleLine=400%20Broad%20St%2C%20Seattle%2C%20WA&f=json&maxLocations=1"
 probe "valhalla preflight" OPTIONS "https://valhalla1.openstreetmap.de/isochrone"
