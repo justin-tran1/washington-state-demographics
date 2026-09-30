@@ -30,7 +30,8 @@
     for (const c of CFG.AMENITIES) {
       state.cats.set(c.id, {
         cfg: c, on: CFG.AMENITIES_DEFAULT_ON.includes(c.id),
-        markers: [], featured: [], shown: false, partial: false, cancel: null, data: null, promise: null, error: null
+        markers: [], featured: [], built: false, featuredCount: 0, F: null,
+        shown: false, partial: false, cancel: null, data: null, promise: null, error: null
       });
     }
 
@@ -95,9 +96,12 @@
         <div class="popup-src">Source: ${link ? `<a href="${U.escapeHTML(link)}" target="_blank" rel="noopener">${srcName}</a>` : srcName}</div></div>`;
     }
 
-    function buildMarkers(cat, d) {
-      const F = {};
-      d.fields.forEach((f, i) => { F[f] = i; });
+    // Markers are built the first time a category is shown: the radius and
+    // area search reads the same files without drawing tens of thousands.
+    function buildMarkers(cat) {
+      if (cat.built) return;
+      cat.built = true;
+      const d = cat.data, F = cat.F;
       const kindIcons = d.kinds.map(k => ({
         small: iconFor(cat, emojiFor(cat, k), false),
         big: iconFor(cat, emojiFor(cat, k), true),
@@ -124,7 +128,11 @@
             if (!d || !Array.isArray(d.rows) || !Array.isArray(d.fields) || !Array.isArray(d.kinds) || !Array.isArray(d.sources)) {
               throw new Error('unexpected file format');
             }
-            buildMarkers(cat, d);
+            const F = {};
+            d.fields.forEach((f, i) => { F[f] = i; });
+            const featuredKinds = d.kinds.map(k => !!(cat.cfg.featured && cat.cfg.featured.test(k)));
+            cat.featuredCount = d.rows.reduce((n, r) => n + (featuredKinds[r[F.kind]] ? 1 : 0), 0);
+            cat.F = F;
             cat.data = d;
             cat.error = null;
             return d;
@@ -141,6 +149,7 @@
       if (cat.cancel) { cat.cancel(); cat.cancel = null; }
       cat.shown = show;
       if (show) {
+        buildMarkers(cat);
         cat.partial = true;
         cat.cancel = U.addLayersChunked(cluster, cat.markers, () => { cat.partial = false; cat.cancel = null; });
         cat.featured.forEach(m => featuredLayer.addLayer(m));
@@ -156,7 +165,7 @@
       const elc = document.getElementById('amen-count-' + cat.cfg.id);
       const lab = document.getElementById('amen-label-' + cat.cfg.id);
       if (!d) { if (elc) elc.textContent = ''; return; }
-      const n = cat.markers.length + cat.featured.length;
+      const n = d.rows.length;
       if (elc) elc.textContent = '· ' + n.toLocaleString();
       if (lab) lab.title = cat.cfg.label + ': ' + n.toLocaleString() + ' places statewide\n' +
         d.sources.map(s => '• ' + s.name + ': ' + (s.count || 0).toLocaleString() +
@@ -169,8 +178,8 @@
       const featuredNotes = [];
       for (const [, cat] of state.cats) {
         if (!cat.on || !cat.data) continue;
-        total += cat.markers.length + cat.featured.length;
-        if (cat.featured.length) featuredNotes.push(cat.featured.length.toLocaleString() + ' ' + cat.cfg.featuredLabel + ' always shown');
+        total += cat.data.rows.length;
+        if (cat.featuredCount) featuredNotes.push(cat.featuredCount.toLocaleString() + ' ' + cat.cfg.featuredLabel + ' always shown');
       }
       return total.toLocaleString() + ' places statewide' + (featuredNotes.length ? ' · ' + featuredNotes.join(' · ') : '');
     }
@@ -199,6 +208,22 @@
 
     return {
       id: 'amenities',
+      /**
+       * Every category's statewide file, loaded once and shared with the
+       * layer: [{ id, cfg, d, F }], or { id, cfg, error } for a file that
+       * could not be loaded. Used by the radius and area search.
+       */
+      loadData() {
+        return Promise.all(Array.from(state.cats.values()).map(cat => load(cat).then(
+          d => ({ id: cat.cfg.id, cfg: cat.cfg, d, F: cat.F }),
+          error => ({ id: cat.cfg.id, cfg: cat.cfg, error }))));
+      },
+      /** The popup a category's row i shows on the map. */
+      popupHTML(id, i) {
+        const cat = state.cats.get(id);
+        return cat && cat.data && cat.data.rows[i] ? popupHTML(cat, cat.data, cat.F, cat.data.rows[i]) : '';
+      },
+      emojiFor(id, kind) { const cat = state.cats.get(id); return cat ? emojiFor(cat, kind) : ''; },
       get enabled() { return state.enabled; },
       setEnabled(on) {
         if (on === state.enabled) return;

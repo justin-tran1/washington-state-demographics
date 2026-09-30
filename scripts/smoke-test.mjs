@@ -327,7 +327,7 @@ assert(await page.evaluate(() => WAMAP.CONFIG.BASEMAPS.every(b => /^https:/.test
 assert(await page.evaluate(() => WAMAP.CONFIG.BASEMAPS.filter(b => /arcgis/.test(b.url)).every(b => /\/tile\/\{z\}\/\{y\}\/\{x\}$/.test(b.url))), 'ArcGIS services use the {z}/{y}/{x} row-major tile order');
 assert(!bmHosts.some(h => h.includes('cartocdn')), 'no CARTO tiles (they now require an API key)');
 assert(!(await page.evaluate(() => WAMAP.CONFIG.BASEMAPS.some(b => /\{apikey\}|\bkey=/.test(b.url)))), 'no base map needs an API key');
-assert(await page.locator('.layer-card').count() === 6, '6 layer cards rendered');
+assert(await page.locator('.layer-card').count() === 7, '7 layer cards rendered');
 
 console.log('· demographics (county level)');
 await setToggle('card-demographics', true);
@@ -359,8 +359,24 @@ await setToggle('card-amenities', true);
 await page.waitForFunction(() => /places statewide|Could not load/.test(document.querySelector('#card-amenities .status-line').textContent), null, { timeout: 20000 }).catch(() => {});
 status = await page.locator('#card-amenities .status-line').textContent();
 assert(/places statewide/.test(status), 'amenities loaded statewide: "' + status.trim() + '"');
-const schoolCount = (await page.locator('#amen-count-schools').textContent()).replace(/\D/g, '');
-assert(+schoolCount === readData('amenities/schools.json').rows.length, `every school in the file is on the map (${schoolCount})`);
+// Counted from the cluster layer's own markers (the category's count label
+// only restates the file), polled while the chunked add finishes.
+const schoolRows = readData('amenities/schools.json').rows.length;
+const schoolLabel = (await page.locator('#amen-count-schools').textContent()).replace(/\D/g, '');
+const countSchoolMarkers = () => page.evaluate(() => {
+  let n = 0;
+  WAMAP.map.eachLayer(l => {
+    if (l instanceof L.MarkerClusterGroup) for (const m of l.getLayers()) if ((m.options.icon && m.options.icon.options.html || '').includes('🏫')) n++;
+  });
+  return n;
+});
+let schoolMarkers = 0;
+for (let k = 0; k < 60; k++) {
+  schoolMarkers = await countSchoolMarkers();
+  if (schoolMarkers >= schoolRows) break;
+  await page.waitForTimeout(250);
+}
+assert(schoolMarkers === schoolRows && +schoolLabel === schoolRows, `every school in the file is a marker on the map (${schoolMarkers} markers, ${schoolRows} rows, label ${schoolLabel})`);
 const health = readData('amenities/health.json');
 // Same rule as CONFIG.AMENITIES' health `featured` (a clinic on a hospital campus is not one).
 const featuredRe = await page.evaluate(() => { const re = WAMAP.CONFIG.AMENITIES.find(c => c.id === 'health').featured; return [re.source, re.flags]; });
@@ -662,6 +678,455 @@ assert((await page.locator('#pin-count').textContent()).trim() === '', 'pins cle
 // below still covers a realistic multi-layer selection
 for (const id of ['amenities', 'transit', 'crime']) await setToggle('card-' + id, true);
 await page.waitForTimeout(1500);
+
+console.log('· radius & area search');
+{
+  // Expectations are computed here, independently of the app's geometry:
+  // haversine distances for circles, a winding-number test in Web Mercator
+  // for polygons, and densified sampling for transit lines. A point within
+  // half a metre of the edge touches it, as the app documents.
+  const RAD = Math.PI / 180, R_E = 6371008.8, RM_E = 6378137, EDGE = 0.5;
+  const hav = (la1, lo1, la2, lo2) => {
+    const a = Math.sin((la2 - la1) * RAD / 2) ** 2 + Math.cos(la1 * RAD) * Math.cos(la2 * RAD) * Math.sin((lo2 - lo1) * RAD / 2) ** 2;
+    return 2 * R_E * Math.asin(Math.sqrt(a));
+  };
+  const merc = (la, lo) => [RM_E * lo * RAD, RM_E * Math.log(Math.tan(Math.PI / 4 + la * RAD / 2))];
+  const winding = (P, x, y) => {
+    let wn = 0;
+    for (let i = 0; i < P.length; i++) {
+      const [x1, y1] = P[i], [x2, y2] = P[(i + 1) % P.length];
+      const side = (x2 - x1) * (y - y1) - (x - x1) * (y2 - y1);
+      if (y1 <= y) { if (y2 > y && side > 0) wn++; } else if (y2 <= y && side < 0) wn--;
+    }
+    return wn !== 0;
+  };
+  const amenIds = await page.evaluate(() => WAMAP.CONFIG.AMENITIES.map(a => a.id));
+  const AMEN = amenIds.map(id => {
+    const d = readData('amenities/' + id + '.json');
+    const F = Object.fromEntries(d.fields.map((f, i) => [f, i]));
+    return { id, pts: d.rows.map(r => [r[F.lat], r[F.lon]]) };
+  });
+  const densify = line => { // [[lon, lat], ...] -> [lat, lon] points every ~5 m
+    const out = [];
+    for (let i = 1; i < line.length; i++) {
+      const [lo1, la1] = line[i - 1], [lo2, la2] = line[i];
+      const n = Math.max(1, Math.ceil(hav(la1, lo1, la2, lo2) / 5));
+      for (let k = 0; k <= n; k++) out.push([la1 + (la2 - la1) * k / n, lo1 + (lo2 - lo1) * k / n]);
+    }
+    return out;
+  };
+  const ROUTE_LINES = WSDOT_ROUTES.features.map(f => ({ name: f.properties.route_short_name, pts: densify(f.geometry.coordinates) }))
+    .concat([{ name: 'Seattle - Bainbridge', pts: densify([[-122.34, 47.6], [-122.5, 47.62]]) }]);
+  const STOP_PTS = WSDOT_STOPS.features.map(f => [f.geometry.coordinates[1], f.geometry.coordinates[0]]);
+  function expectCircle(lat, lon, r) {
+    const inside = ([la, lo]) => hav(lat, lon, la, lo) <= r + EDGE;
+    return {
+      places: AMEN.reduce((n, c) => n + c.pts.filter(inside).length, 0),
+      stops: STOP_PTS.filter(inside).length,
+      routes: ROUTE_LINES.filter(l => l.pts.some(inside)).length
+    };
+  }
+  function expectPolygon(pts) {
+    const P = pts.map(([la, lo]) => merc(la, lo));
+    const midLat = (Math.min(...pts.map(p => p[0])) + Math.max(...pts.map(p => p[0]))) / 2;
+    const tol = EDGE / Math.cos(midLat * RAD); // half a metre on the ground, in Mercator metres
+    const nearEdge = (x, y) => P.some(([ax, ay], i) => {
+      const [bx, by] = P[(i + 1) % P.length], dx = bx - ax, dy = by - ay;
+      const t = Math.max(0, Math.min(1, ((x - ax) * dx + (y - ay) * dy) / (dx * dx + dy * dy)));
+      return Math.hypot(ax + t * dx - x, ay + t * dy - y) <= tol;
+    });
+    const inside = ([la, lo]) => { const [x, y] = merc(la, lo); return winding(P, x, y) || nearEdge(x, y); };
+    return {
+      places: AMEN.reduce((n, c) => n + c.pts.filter(inside).length, 0),
+      stops: STOP_PTS.filter(inside).length,
+      routes: ROUTE_LINES.filter(l => l.pts.some(inside)).length
+    };
+  }
+  const areasList = () => page.evaluate(() => WAMAP.areas.list());
+  const settled = async (pred, ms = 8000) => page.waitForFunction(pred, null, { timeout: ms }).catch(() => {});
+  const ready = i => settled(`(() => { const s = WAMAP.areas.list()[${i}]; return s && s.counts.places != null && s.transit === 'ok'; })()`, 15000);
+  const box = async sel => {
+    const b = await page.locator(sel).first().boundingBox();
+    return b ? { x: b.x + b.width / 2, y: b.y + b.height / 2 } : null;
+  };
+  async function drag(from, dx, dy, opts = {}) {
+    await page.mouse.move(from.x, from.y);
+    await page.mouse.down({ button: opts.button || 'left' });
+    for (let k = 1; k <= 8; k++) await page.mouse.move(from.x + dx * k / 8, from.y + dy * k / 8);
+    await page.mouse.up();
+    await page.waitForTimeout(700);
+  }
+  const sameCounts = (got, want) => got.places === want.places && got.stops === want.stops && got.routes === want.routes;
+  const cstr = c => `${c.places} places / ${c.stops} stops / ${c.routes} routes`;
+
+  // Interactive layers off while the pin goes down (a click on a line or dot opens its popup instead).
+  for (const id of ['amenities', 'transit', 'crime']) await setToggle('card-' + id, false);
+  await page.evaluate(() => { WAMAP.map.closePopup(); WAMAP.map.setView([47.605, -122.335], 14, { animate: false }); });
+  await page.waitForTimeout(900);
+  const mb = await page.locator('#map').boundingBox();
+  const mid = { x: mb.x + mb.width / 2, y: mb.y + mb.height / 2 };
+
+  // A pin, then a radius search from its popup
+  await page.locator('#pin-mode-btn').click();
+  await page.mouse.click(mid.x, mid.y);
+  await page.keyboard.press('Escape');
+  await settled(() => document.getElementById('pin-count').textContent.trim() === '1');
+  await page.waitForTimeout(500);
+  await page.locator('.user-pin').first().click();
+  await page.locator('.leaflet-popup-content button', { hasText: 'Radius search' }).click();
+  await ready(0);
+  let L0 = (await areasList())[0];
+  const pinId = L0 && L0.pinId;
+  const pinData = await page.evaluate(id => WAMAP.pins.get(id), pinId);
+  assert(L0 && L0.type === 'circle' && Math.abs(L0.radius - 1609.344) < 0.01 && L0.unit === 'mi', 'pin popup starts a 1 mile radius search: ' + JSON.stringify(L0 && { type: L0.type, radius: L0.radius, unit: L0.unit }));
+  assert(pinData && Math.abs(pinData.lat - L0.lat) < 1e-9 && Math.abs(pinData.lon - L0.lon) < 1e-9, 'the circle is centred on its pin');
+  let want = expectCircle(L0.lat, L0.lon, L0.radius);
+  assert(want.places > 50 && sameCounts(L0.counts, want), `1 mile circle lists every place, stop and route inside or touching it: ${cstr(L0.counts)} (expected ${cstr(want)})`);
+  assert(await page.locator('#card-areas .card-toggle input').isChecked(), 'the search card switches itself on for a new shape');
+
+  // Typed radius
+  await page.locator('#card-areas .area-radius').first().fill('0.5');
+  await page.locator('#card-areas .area-radius').first().press('Enter');
+  await ready(0);
+  L0 = (await areasList())[0];
+  want = expectCircle(L0.lat, L0.lon, L0.radius);
+  assert(Math.abs(L0.radius - 804.672) < 0.01 && sameCounts(L0.counts, want), `typing 0.5 mi resizes the circle and its list: ${cstr(L0.counts)} (expected ${cstr(want)})`);
+
+  // Drag-to-resize
+  const hb = await box('.area-handle');
+  await drag(hb, 90, 0);
+  await ready(0);
+  L0 = (await areasList())[0];
+  want = expectCircle(L0.lat, L0.lon, L0.radius);
+  const shown = await page.locator('#card-areas .area-radius').first().inputValue();
+  assert(L0.radius > 900 && Math.abs(+shown - L0.radius / 1609.344) < 0.001, `dragging the handle resizes the circle (${(L0.radius / 1609.344).toFixed(3)} mi, input ${shown})`);
+  assert(sameCounts(L0.counts, want), `list follows the drag: ${cstr(L0.counts)} (expected ${cstr(want)})`);
+  const handleLabel = (await page.locator('.area-handle-label').first().textContent()).trim();
+  assert(/mi$/.test(handleLabel), 'the handle shows the radius: ' + handleLabel);
+
+  // A redrawn list keeps its open group and the rows it showed
+  const cSel = '#area-' + L0.id;
+  const counts0 = await page.locator(cSel + ' .area-group .cat-count').allTextContents();
+  const bigGroup = counts0.map(t => +t.replace(/\D/g, '')).reduce((b, n, i, a) => (n > a[b] ? i : b), 0);
+  await page.locator(cSel + ' .area-group > summary').nth(bigGroup).click();
+  await page.locator(cSel + ' .area-group[open] .area-more').click(); // past the first page
+  const rowsBefore = await page.locator(cSel + ' .area-group[open] .area-item').count();
+  await page.locator(cSel + ' .area-unit').selectOption('km');
+  await page.waitForTimeout(300);
+  const rowsAfter = await page.locator(cSel + ' .area-group[open] .area-item').count();
+  const kmLabel = (await page.locator('.area-handle-label').first().textContent()).trim();
+  assert(rowsBefore > 100 && rowsAfter === rowsBefore && /km$/.test(kmLabel), `a redrawn list keeps its open group and the rows it showed (${rowsAfter} of ${rowsBefore}; handle ${kmLabel})`);
+  await page.locator(cSel + ' .area-unit').selectOption('mi');
+  await page.locator(cSel + ' .area-group[open] > summary').first().click(); // closed again
+
+  // Style
+  await page.evaluate(() => {
+    const set = (sel, v, ev) => { const el = document.querySelector('#card-areas ' + sel); el.value = v; el.dispatchEvent(new Event(ev)); };
+    set('.area-color', '#aa3355', 'input');
+    set('input[aria-label="Fill opacity"]', '40', 'input');
+    set('input[aria-label="Outline opacity"]', '60', 'input');
+    set('select[aria-label="Outline width"]', '4', 'change');
+    set('select[aria-label="Outline style"]', 'dashed', 'change');
+  });
+  L0 = (await areasList())[0];
+  const ls = L0.layerStyle;
+  assert(ls.color === '#aa3355' && ls.fillOpacity === 0.4 && ls.opacity === 0.6 && ls.weight === 4 && !!ls.dashArray,
+    'colour, fill opacity, outline opacity, width and dash apply to the circle: ' + JSON.stringify(ls));
+  await page.locator('#card-areas .area-icon-btn[title="Hide on the map"]').first().click();
+  assert(!(await areasList())[0].onMap, 'the eye button hides the shape');
+  await page.locator('#card-areas .area-icon-btn[title="Show on the map"]').first().click();
+  assert((await areasList())[0].onMap, 'and shows it again');
+
+  // The pin follows: dragging it moves its circle
+  const pb = await box('.user-pin');
+  await drag(pb, -60, 40);
+  await ready(0);
+  L0 = (await areasList())[0];
+  const moved = await page.evaluate(id => WAMAP.pins.get(id), pinId);
+  want = expectCircle(L0.lat, L0.lon, L0.radius);
+  assert(Math.abs(moved.lat - L0.lat) < 1e-9 && Math.abs(moved.lon - pinData.lon) > 1e-4 && sameCounts(L0.counts, want),
+    `dragging the pin moves its circle and refreshes the list: ${cstr(L0.counts)} (expected ${cstr(want)})`);
+
+  // A second ring from the popup
+  await page.locator('.user-pin').first().click();
+  const popupText = await page.locator('.leaflet-popup-content').textContent();
+  assert(/places/.test(popupText), 'the pin popup summarises its radius search: ' + popupText.replace(/\s+/g, ' ').slice(0, 120));
+  await page.locator('.leaflet-popup-content button', { hasText: 'Add another radius' }).click();
+  await ready(1);
+  const L1 = (await areasList())[1];
+  assert(L1 && Math.abs(L1.radius - 1609.344) < 0.01 && L1.pinId === pinId, 'a second ring steps up to the next usual radius (1 mile)');
+  assert(L1 && Math.abs(L1.bearing - 55) < 1e-9, 'its handle sits 35° round from the first ring\'s, so the labels do not stack (' + (L1 && L1.bearing) + '°)');
+  await page.locator('#area-' + L1.id + ' .area-icon-btn[title="Delete this shape"]').click();
+  assert((await areasList()).length === 1, 'a shape can be deleted');
+
+  // Drawing an area, with the amenities layer on: a click on a marker adds a corner
+  await setToggle('card-amenities', true);
+  await page.evaluate(() => { WAMAP.map.closePopup(); WAMAP.map.setView([47.61, -122.33], 14, { animate: false }); });
+  await page.waitForTimeout(1200);
+  const poi = await page.evaluate(([x0, y0, w, h]) => {
+    for (const el of document.querySelectorAll('.leaflet-marker-pane .marker-cluster, .leaflet-marker-pane .poi-chip')) {
+      const b = el.getBoundingClientRect(), cx = b.x + b.width / 2, cy = b.y + b.height / 2;
+      if (cx > x0 + w * 0.3 && cx < x0 + w * 0.7 && cy > y0 + h * 0.3 && cy < y0 + h * 0.7) return { x: cx, y: cy };
+    }
+    return null;
+  }, [mb.x, mb.y, mb.width, mb.height]);
+  const corners = [poi || { x: mid.x - 150, y: mid.y - 100 }, { x: mid.x + 170, y: mid.y - 120 }, { x: mid.x + 180, y: mid.y + 130 }, { x: mid.x - 160, y: mid.y + 120 }];
+  const cxy = corners.reduce((a, p) => ({ x: a.x + p.x / 4, y: a.y + p.y / 4 }), { x: 0, y: 0 });
+  corners.sort((a, b) => Math.atan2(a.y - cxy.y, a.x - cxy.x) - Math.atan2(b.y - cxy.y, b.x - cxy.x));
+  await page.locator('#draw-area-btn').click();
+  assert(await page.locator('.draw-capture').count() === 1 && await page.locator('.draw-bar').isVisible(), 'drawing shows its capture layer and toolbar');
+  for (const c of corners) { await page.mouse.click(c.x, c.y); await page.waitForTimeout(350); }
+  assert(!(await page.locator('.leaflet-popup').count()), 'clicks while drawing never open marker popups' + (poi ? ' (one landed on a marker)' : ''));
+  await page.mouse.click(corners[0].x, corners[0].y); // closing click on the first corner
+  await ready(1);
+  let P = (await areasList())[1];
+  assert(P && P.type === 'polygon' && P.pts.length === 4 && P.editing, 'clicking the first corner closes a 4-corner area, ready to reshape: ' + JSON.stringify(P && { pts: P.pts.length, editing: P.editing }));
+  assert(await page.locator('.draw-capture').count() === 0, 'the capture layer is gone after finishing');
+  want = expectPolygon(P.pts);
+  assert(want.places > 20 && sameCounts(P.counts, want), `the area lists every place, stop and route inside or touching it: ${cstr(P.counts)} (expected ${cstr(want)})`);
+
+  // Reshape: drag a corner, add a corner from a midpoint, remove one by right-click
+  const before = P.pts[0].slice();
+  const vb = await box('.area-vertex');
+  await drag(vb, 70, 45);
+  await ready(1);
+  P = (await areasList())[1];
+  want = expectPolygon(P.pts);
+  assert((P.pts[0][0] !== before[0] || P.pts[0][1] !== before[1]) && sameCounts(P.counts, want), `dragging a corner reshapes the area and its list: ${cstr(P.counts)} (expected ${cstr(want)})`);
+  await drag(await box('.area-mid'), 25, -35);
+  await ready(1);
+  P = (await areasList())[1];
+  assert(P.pts.length === 5, 'dragging a midpoint adds a corner (' + P.pts.length + ')');
+  const v2 = await box('.area-vertex');
+  await page.mouse.click(v2.x, v2.y, { button: 'right' });
+  await page.waitForTimeout(600);
+  P = (await areasList())[1];
+  assert(P.pts.length === 4, 'right-clicking a corner removes it (' + P.pts.length + ')');
+  const ptsBefore = P.pts.map(p => p.slice());
+  await drag(await box('.area-label'), 40, 30);
+  await ready(1);
+  P = (await areasList())[1];
+  const dLat = P.pts.map((p, i) => p[0] - ptsBefore[i][0]);
+  assert(dLat.every(d => Math.abs(d) > 1e-5) && Math.max(...dLat) - Math.min(...dLat) < 1e-4, 'dragging the label moves the whole area');
+  want = expectPolygon(P.pts);
+  assert(sameCounts(P.counts, want), `list follows the move: ${cstr(P.counts)} (expected ${cstr(want)})`);
+  assert(P.labelPane === 'areaHandles' && /· [\d,]+ places? · [\d,]+ stops?$/.test(P.label), 'while reshaping, the label sits with the handles and names its counts: ' + P.label);
+  await page.locator('#area-' + P.id + ' .area-icon-btn[title="Done reshaping"]').click();
+  P = (await areasList())[1];
+  assert(await page.locator('.area-vertex').count() === 0 && !P.editing, 'Done reshaping hides the corner handles');
+  assert(P.labelPane === 'areaLabels', 'and the label goes back under the markers, so it never hides a pin or a place');
+
+  // Results list: open a group, click a place
+  const group = page.locator('#area-' + P.id + ' .area-group > summary').first();
+  await group.click();
+  const firstItem = page.locator('#area-' + P.id + ' .area-item').first();
+  const itemName = (await firstItem.locator('.area-item-name').textContent()).trim();
+  await firstItem.click();
+  await page.waitForTimeout(500);
+  const pop = (await page.locator('.leaflet-popup-content').textContent().catch(() => '')) || '';
+  assert(pop.includes(itemName), 'clicking a listed place opens its popup on the map: ' + itemName);
+  const rings = () => page.evaluate(() => { let n = 0; WAMAP.map.eachLayer(l => { if (l instanceof L.CircleMarker && l.options.radius === 17 && l.options.fill === false) n++; }); return n; });
+  const secondItem = page.locator('#area-' + P.id + ' .area-item').nth(1);
+  if (await secondItem.count()) {
+    await secondItem.click();
+    await page.waitForTimeout(500);
+    const n = await rings();
+    assert(n === 2, 'the next listed place clicked keeps its highlight ring (casing and ring: ' + n + ' layers)');
+  }
+  await page.evaluate(() => WAMAP.map.closePopup());
+  assert(await rings() === 0, 'closing the popup removes the highlight');
+
+  // CSV
+  const [dl] = await Promise.all([page.waitForEvent('download'), page.locator('#area-' + P.id + ' button', { hasText: 'CSV' }).click()]);
+  const csv = readFileSync(await dl.path(), 'utf8').replace(/^﻿/, '').trim().split(/\r\n/);
+  const nRows = P.counts.places + P.counts.stops + P.counts.routes;
+  assert(/^Area,Group,Type,Name,Address,Latitude,Longitude,Agency \/ source,Link$/.test(csv[0]) && csv.length === nRows + 1,
+    `CSV has a header and one row per listed item (${csv.length - 1} of ${nRows}): ${dl.suggestedFilename()}`);
+
+  // Esc cancels a drawing without leaving a shape
+  await page.locator('#draw-area-btn').click();
+  await page.mouse.click(mid.x - 60, mid.y - 40);
+  await page.waitForTimeout(350);
+  await page.mouse.click(mid.x + 60, mid.y - 40);
+  await page.keyboard.press('Escape');
+  await page.waitForTimeout(300);
+  assert((await areasList()).length === 2 && await page.locator('.draw-capture').count() === 0 && await page.locator('.draw-bar').count() === 0,
+    'Esc cancels a drawing and leaves no shape behind');
+
+  // Enter on a toolbar button presses that button: Cancel cancels, even with three corners down
+  await page.locator('#draw-area-btn').click();
+  for (const [dx, dy] of [[-80, -50], [80, -50], [0, 70]]) { await page.mouse.click(mid.x + dx, mid.y + dy); await page.waitForTimeout(350); }
+  await page.locator('.draw-bar button', { hasText: 'Cancel' }).focus();
+  await page.keyboard.press('Enter');
+  await page.waitForTimeout(300);
+  assert((await areasList()).length === 2 && await page.locator('.draw-bar').count() === 0, 'Enter on the Cancel button cancels the drawing instead of closing the area');
+
+  // From the keyboard: the arrow keys move the map under a crosshair, A puts a corner there, Enter closes
+  await page.locator('#draw-area-btn').click();
+  const kbdCorners = [];
+  for (const key of ['ArrowLeft', 'ArrowUp', 'ArrowRight']) {
+    await page.keyboard.press(key);
+    await page.waitForTimeout(450);
+    kbdCorners.push(await page.evaluate(() => { const c = WAMAP.map.getCenter(); return [c.lat, c.lng]; }));
+    await page.keyboard.press('a');
+  }
+  assert(await page.locator('.draw-capture.kbd').count() === 1, 'using the keyboard shows the crosshair');
+  await page.keyboard.press('Enter');
+  await ready(2);
+  const K = (await areasList())[2];
+  const focusedLabel = await page.evaluate(() => document.activeElement && document.activeElement.getAttribute('aria-label'));
+  assert(K && K.type === 'polygon' && K.pts.length === 3 &&
+    K.pts.every((p, i) => Math.abs(p[0] - kbdCorners[i][0]) < 1e-9 && Math.abs(p[1] - kbdCorners[i][1]) < 1e-9) && focusedLabel === 'Name',
+    'from the keyboard, A puts each corner at the crosshair and Enter closes the area, then focus goes to its name: ' + JSON.stringify(K && K.pts.length) + ' / ' + focusedLabel);
+
+  // Closing with a double-click on the first corner keeps that corner
+  await page.locator('#draw-area-btn').click();
+  const dcs = [[-90, -60], [90, -60], [100, 60], [-80, 70]].map(([dx, dy]) => ({ x: mid.x + dx, y: mid.y + dy }));
+  for (const c of dcs) { await page.mouse.click(c.x, c.y); await page.waitForTimeout(350); }
+  await page.mouse.dblclick(dcs[0].x, dcs[0].y);
+  await page.waitForTimeout(700);
+  const D = (await areasList())[3];
+  assert(D && D.type === 'polygon' && D.pts.length === 4, 'double-clicking the first corner closes the area and keeps all four corners (' + (D && D.pts.length) + ')');
+
+  // Geometry notes: an area whose edges cross, and a small area in square feet
+  const geomText = async pts => {
+    const id = await page.evaluate(p => WAMAP.areas.addPolygon(p).id, pts);
+    const t = (await page.locator('#area-' + id + ' .area-geom').textContent()).trim();
+    await page.locator('#area-' + id + ' .area-icon-btn[title="Delete this shape"]').click();
+    return t;
+  };
+  const [cLat, cLon] = await page.evaluate(() => { const c = WAMAP.map.getCenter(); return [c.lat, c.lng]; });
+  const bowText = await geomText([[cLat - 0.002, cLon - 0.002], [cLat + 0.002, cLon + 0.002], [cLat + 0.002, cLon - 0.002], [cLat - 0.002, cLon + 0.002]]);
+  assert(/^Edges cross/.test(bowText), 'an area whose edges cross says so instead of giving a wrong area: ' + bowText);
+  const smallText = await geomText([[cLat, cLon], [cLat + 0.0001, cLon], [cLat + 0.0001, cLon + 0.00015], [cLat, cLon + 0.00015]]);
+  assert(/^[\d,]+ sq ft · /.test(smallText), 'a small area is given in square feet: ' + smallText);
+  for (const x of [D, K]) if (x) await page.locator('#area-' + x.id + ' .area-icon-btn[title="Delete this shape"]').click();
+  assert((await areasList()).length === 2, 'the extra areas are deleted again');
+
+  // Saved in the browser: a reload brings both shapes back, the circle on its pin
+  const savedShapes = await areasList();
+  await page.reload({ waitUntil: 'domcontentloaded' });
+  await page.waitForFunction(() => window.WAMAP && WAMAP.areas && WAMAP.areas.list().length === 2, null, { timeout: 10000 }).catch(() => {});
+  await ready(0); await ready(1);
+  const restored = await areasList();
+  const rc = restored.find(s => s.type === 'circle'), rp = restored.find(s => s.type === 'polygon');
+  const oc = savedShapes.find(s => s.type === 'circle'), op = savedShapes.find(s => s.type === 'polygon');
+  assert(restored.length === 2 && rc && rc.pinId === pinId && Math.abs(rc.radius - oc.radius) < 0.02 && rc.style.color === '#aa3355',
+    'after a reload the circle is back on its pin with its radius and style');
+  const samePts = rp && rp.pts.length === op.pts.length && rp.pts.every((p, i) => Math.abs(p[0] - op.pts[i][0]) < 2e-6 && Math.abs(p[1] - op.pts[i][1]) < 2e-6);
+  const rpWant = rp ? expectPolygon(rp.pts) : null;
+  assert(samePts && sameCounts(rp.counts, rpWant), `and the area is back with its corners and list: ${rp ? cstr(rp.counts) : '-'} (expected ${rpWant ? cstr(rpWant) : '-'})`);
+
+  // Switched off, the card stays off after a reload: the shapes wait and nothing loads until asked
+  await page.locator('#card-areas .card-toggle').click();
+  await page.waitForTimeout(800); // the link state follows the switch
+  assert(!(await page.locator('#card-areas .card-toggle input').isChecked()), 'the search card can be switched off');
+  await page.reload({ waitUntil: 'domcontentloaded' });
+  await page.waitForFunction(() => window.WAMAP && WAMAP.areas && WAMAP.areas.list().length === 2, null, { timeout: 10000 }).catch(() => {});
+  await page.waitForTimeout(1000);
+  let off = await areasList();
+  assert(off.length === 2 && !(await page.locator('#card-areas .card-toggle input').isChecked()) &&
+    off.every(s => !s.onMap && s.counts.places == null && s.transit === 'idle' && /not loaded/.test(s.summary)),
+    'a card switched off stays off after a reload, its shapes kept and nothing loaded: ' + JSON.stringify(off.map(s => [s.onMap, s.counts.places, s.transit, s.summary])));
+  const offIdx = off.findIndex(s => s.type === 'polygon');
+  await page.locator('#area-' + off[offIdx].id + ' .area-title').click();
+  await ready(offIdx);
+  off = await areasList();
+  const offWant = expectPolygon(off[offIdx].pts);
+  assert(!off[offIdx].onMap && sameCounts(off[offIdx].counts, offWant), `opening an entry lists its results while the card is off: ${cstr(off[offIdx].counts)} (expected ${cstr(offWant)})`);
+  await page.locator('#card-areas .card-toggle').click();
+  await ready(0); await ready(1);
+  assert((await areasList()).every(s => s.onMap), 'switching the card back on shows the shapes');
+
+  // Removing a pin removes its circles
+  await page.locator('#pin-clear-btn').click();
+  await page.waitForTimeout(300);
+  const left = await areasList();
+  assert(left.length === 1 && left[0].type === 'polygon', 'clearing the pins removes their radius searches');
+  await page.locator('#area-' + left[0].id + ' .area-icon-btn[title="Delete this shape"]').click();
+  assert((await areasList()).length === 0 && await page.locator('#card-areas .area-empty').isVisible(), 'deleting the last shape empties the list');
+
+  // Transit answers stay true to the shape. Here the stops service answers
+  // slowly (when told to) and only with the stops inside the queried box,
+  // from a grid of stops over Seattle.
+  const GRID = [];
+  for (let la = 47.5; la <= 47.75 + 1e-9; la += 0.004) for (let lo = -122.5; lo <= -122.2 + 1e-9; lo += 0.004) GRID.push([+lo.toFixed(4), +la.toFixed(4)]);
+  const tq = { delay: 0, fail: false, aborted: 0, queries: 0 };
+  const onFailed = r => { if (/FeatureServer\/[13]\/query/.test(r.url())) tq.aborted++; };
+  page.on('requestfailed', onFailed);
+  const TQ_URL = /FeatureServer\/[13]\/query|interpreter/;
+  const tqRoute = async route => {
+    const url = new URL(route.request().url());
+    try {
+      if (tq.fail) return await route.fulfill({ status: 500, contentType: 'text/plain', body: 'down' });
+      if (url.pathname.includes('interpreter')) return await route.fallback();
+      if (tq.delay) await new Promise(r => setTimeout(r, tq.delay));
+      if (!/FeatureServer\/1\/query/.test(url.pathname)) return await route.fallback();
+      tq.queries++;
+      const env = (url.searchParams.get('geometry') || '').split(',').map(Number);
+      const feats = +(url.searchParams.get('resultOffset') || 0) ? [] : GRID.filter(([lo, la]) => lo >= env[0] && la >= env[1] && lo <= env[2] && la <= env[3])
+        .map(([lo, la]) => ({ type: 'Feature', properties: { stop_name: 'Grid ' + lo + ',' + la, stop_id: 'KCM_' + Math.round((lo + 180) * 1e4) + '_' + Math.round(la * 1e4) },
+          geometry: { type: 'Point', coordinates: [lo, la] } }));
+      return await route.fulfill({ contentType: 'application/json', body: JSON.stringify({ type: 'FeatureCollection', features: feats }) });
+    } catch (e) { /* the page cancelled the request meanwhile */ }
+  };
+  await page.route(TQ_URL, tqRoute);
+  const gridWant = s => GRID.filter(([lo, la]) => hav(s.lat, s.lon, la, lo) <= s.radius + EDGE).length;
+  await setToggle('card-amenities', false);
+  await page.evaluate(() => { WAMAP.map.closePopup(); WAMAP.map.setView([47.62, -122.35], 13, { animate: false }); });
+  await page.waitForTimeout(800);
+  await page.locator('#pin-mode-btn').click();
+  await page.mouse.click(mid.x, mid.y);
+  await page.keyboard.press('Escape');
+  await settled(() => document.getElementById('pin-count').textContent.trim() === '1');
+  const gridPin = await page.evaluate(() => JSON.parse(localStorage.getItem('wamap:pins')).v[0].id);
+  await page.evaluate(id => { WAMAP.areas.addCircle(id, 1500); }, gridPin);
+  await ready(0);
+  let T = (await areasList())[0];
+  assert(T.counts.stops === gridWant(T) && gridWant(T) > 20, `transit stops come from the answer for the shape's own box: ${T.counts.stops} (expected ${gridWant(T)})`);
+  // Away and back while the far query is slow: its late answer must not land.
+  tq.delay = 3000; tq.aborted = 0;
+  await drag(await box('.user-pin'), 300, 0);
+  await page.waitForTimeout(300);
+  T = (await areasList())[0];
+  assert(T.transit === 'loading' && T.counts.stops == null && /transit loading/.test(T.summary),
+    'while a query for a moved shape runs, no stale transit counts are shown: ' + T.summary);
+  await drag(await box('.user-pin'), -300, 0);
+  await page.waitForTimeout(4000);
+  T = (await areasList())[0];
+  assert(T.transit === 'ok' && T.counts.stops === gridWant(T), `moved back inside the first answer, the late answer for the far spot is ignored: ${T.counts.stops} stops (expected ${gridWant(T)})`);
+  assert(tq.aborted >= 1, 'and the superseded query is cancelled (' + tq.aborted + ' requests)');
+  // A coarse answer for a big circle is not reused when it shrinks: finer lines are fetched, and the list says so meanwhile.
+  tq.delay = 0;
+  const rin = page.locator('#card-areas .area-radius').first();
+  await rin.fill('31'); await rin.press('Enter');
+  await ready(0);
+  T = (await areasList())[0];
+  assert(T.counts.stops === gridWant(T), `a 31 mile circle lists its ${gridWant(T)} grid stops: ${T.counts.stops}`);
+  tq.delay = 2500;
+  const q0 = tq.queries;
+  await rin.fill('3'); await rin.press('Enter');
+  await page.waitForTimeout(1000);
+  T = (await areasList())[0];
+  assert(T.transit === 'loading' && T.counts.stops != null && /updating transit/.test(T.summary),
+    'shrinking it refetches, saying so while the last answer stands in: ' + T.summary);
+  await ready(0);
+  T = (await areasList())[0];
+  assert(tq.queries > q0 && T.counts.stops === gridWant(T) && !/updating/.test(T.summary), `then the list settles: ${T.counts.stops} stops (expected ${gridWant(T)})`);
+  // A failed query leaves no stale counts behind.
+  tq.delay = 0; tq.fail = true;
+  await drag(await box('.user-pin'), 0, 300);
+  await settled(() => WAMAP.areas.list()[0].transit === 'err', 20000);
+  T = (await areasList())[0];
+  assert(T.transit === 'err' && T.counts.stops == null && /transit unavailable/.test(T.summary), 'a failed transit query shows transit as unavailable, not old counts: ' + T.summary);
+  await page.unroute(TQ_URL, tqRoute);
+  page.off('requestfailed', onFailed);
+  await page.locator('#pin-clear-btn').click();
+  assert((await areasList()).length === 0, 'clearing the pin removes its circle');
+
+  for (const id of ['amenities', 'transit', 'crime']) await setToggle('card-' + id, true);
+  await page.waitForTimeout(1200);
+}
 
 console.log('· about modal');
 await page.locator('#about-btn').click();
