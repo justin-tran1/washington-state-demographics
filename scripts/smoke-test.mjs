@@ -354,6 +354,110 @@ await page.waitForTimeout(1200);
 assert(!(await page.locator('#card-demographics .card-toggle input').isChecked()), 'enabling insurance switched demographics off');
 assert(/Uninsured rate/.test(await page.locator('.legend-block[data-layer="insurance"] .legend-title').textContent()), 'insurance legend visible');
 
+console.log('· health insurance: payer mix and insurance sources');
+{
+  const INS = await page.evaluate(() => ({
+    payers: WAMAP.CONFIG.INSURANCE.payers.map(p => ({ id: p.id, field: p.field, label: p.label })),
+    sources: WAMAP.CONFIG.INSURANCE.sources.map(s => ({ field: s.field, label: s.label, table: s.table }))
+  }));
+  const V = ACS_COUNTY.vintage;
+  const pct1 = v => (v == null ? '—' : Number(v).toLocaleString('en-US', { minimumFractionDigits: 1, maximumFractionDigits: 1 }) + '%');
+  const tableUrl = (t, g) => `https://data.census.gov/table/ACSDT5Y${V}.${t}?g=${!g ? '040XX00US53' : g.length === 5 ? '050XX00US' + g : '1400000US' + g}`;
+  // The table behind each field, as the build recorded it.
+  const TABLES = (ACS_COUNTY.insurance && ACS_COUNTY.insurance.tables) || {};
+  assert(TABLES.pmEmployer === 'B27010' && /^[BC]27007$/.test(TABLES.srcMedicaid || '') && INS.sources.every(x => TABLES[x.field]),
+    'the data file names the ACS table behind every insurance figure: ' + JSON.stringify(TABLES));
+
+  // The data: every area's payer mix adds up to 100%, and each payer agrees
+  // with the coverage-type tables (people whose payer is Medicaid all have
+  // Medicaid, and so on). These tables are separate tabulations, so this
+  // also catches a line mapped to the wrong type.
+  const PM = ['pmEmployer', 'pmDirect', 'pmMedicare', 'pmMedicaid', 'pmMilitary', 'pmOther', 'pctUninsured'];
+  for (const [lvl, d] of [['county', ACS_COUNTY], ['tract', readData('acs/tract.json')]]) {
+    const F = Object.fromEntries(d.fields.map((f, i) => [f, i]));
+    const missing = [...PM, 'pmDual', ...INS.sources.map(x => x.field)].filter(f => F[f] == null);
+    if (missing.length) { assert(false, `${lvl} data carries the payer mix and insurance sources (missing ${missing.join(', ')})`); continue; }
+    let n = 0;
+    const bad = [], E = 0.05;
+    for (const [g, r] of Object.entries(d.rows)) {
+      const v = f => r[F[f]];
+      if (v('pmEmployer') == null) continue;
+      n++;
+      const sum = PM.reduce((a, f) => a + v(f), 0);
+      const why = [];
+      if (Math.abs(sum - 100) > E) why.push('sums to ' + sum.toFixed(2));
+      if (v('pmDual') > v('pmMedicaid') + E) why.push('dual > Medicaid');
+      if (v('pmEmployer') > v('srcEmployer') + E) why.push('employer');
+      if (v('pmDirect') > v('srcDirect') + E) why.push('direct-purchase');
+      if (v('pmMedicare') > v('srcMedicare') + E) why.push('Medicare');
+      if (v('pmMedicaid') > v('srcMedicaid') + E) why.push('Medicaid');
+      // Medicaid holds everyone with Medicaid when the build had the Medicaid table.
+      if (/\+/.test(TABLES.pmMedicaid || '') && Math.abs(v('pmMedicaid') - v('srcMedicaid')) > 0.02) why.push('Medicaid is not all Medicaid holders');
+      if (v('pmMilitary') > v('srcTricare') + v('srcVA') + E) why.push('military');
+      if (Math.max(v('srcEmployer'), v('srcDirect'), v('srcTricare')) > v('srcPrivate') + E) why.push('private');
+      if (Math.max(v('srcMedicare'), v('srcMedicaid'), v('srcVA')) > v('srcPublic') + E) why.push('public');
+      if (v('srcPrivate') + v('srcPublic') < v('pctInsured') - E) why.push('insured');
+      if (why.length) bad.push(g + ' ' + why.join(', '));
+    }
+    assert(n >= (lvl === 'county' ? 39 : 1500) && !bad.length,
+      `${lvl} payer mix adds up to 100% in all ${n} areas and agrees with the coverage-type tables` + (bad.length ? ` (${bad.length} disagree, e.g. ${bad.slice(0, 3).join('; ')})` : ''));
+  }
+
+  // The menu groups the metrics.
+  const groups = await page.locator('#card-insurance select.input optgroup').evaluateAll(els => els.map(e => [e.label, e.children.length]));
+  assert(groups.length === 3 && groups[0][0] === 'Coverage' && /^Payer mix/.test(groups[1][0]) && groups[1][1] === 7 && /^Insurance sources/.test(groups[2][0]) && groups[2][1] === 8,
+    'the insurance menu groups coverage, payer mix and insurance sources: ' + JSON.stringify(groups));
+  // A mapped metric names what it counts and links its ACS table.
+  const leg = page.locator('.legend-block[data-layer="insurance"]');
+  const insSel = page.locator('#card-insurance select.input');
+  await insSel.selectOption('pm-medicare');
+  await page.waitForTimeout(900);
+  let legHref = await leg.locator('.legend-src a').getAttribute('href').catch(() => null);
+  assert(/Payer mix: Medicare/.test(await leg.textContent()) && /each person counted once/.test(await leg.textContent()) && legHref === tableUrl('B27010'),
+    'a payer-mix metric maps with its note and a link to ACS table B27010: ' + legHref);
+  await insSel.selectOption('src-medicaid');
+  await page.waitForTimeout(900);
+  legHref = await leg.locator('.legend-src a').getAttribute('href').catch(() => null);
+  assert(/Medicaid\/means-tested coverage/.test(await leg.textContent()) && /shares overlap/.test(await leg.textContent()) && legHref === tableUrl(TABLES.srcMedicaid),
+    `an insurance-source metric cites the table its data came from (${TABLES.srcMedicaid}): ` + legHref);
+
+  // An area's profile: payer mix bar and values, source bars, table links.
+  const KF = Object.fromEntries(ACS_COUNTY.fields.map((f, i) => [f, i]));
+  const king = ACS_COUNTY.rows['53033'];
+  const kv = f => king[KF[f]];
+  await page.evaluate(([lat, lon]) => { WAMAP.map.closePopup(); WAMAP.map.setView([lat, lon], 8, { animate: false }); }, [kv('lat'), kv('lon')]);
+  await page.waitForTimeout(1500);
+  const kp = await page.evaluate(([lat, lon]) => { const p = WAMAP.map.latLngToContainerPoint([lat, lon]); const b = WAMAP.map.getContainer().getBoundingClientRect(); return { x: b.left + p.x, y: b.top + p.y }; }, [kv('lat'), kv('lon')]);
+  await page.mouse.click(kp.x, kp.y);
+  await page.waitForTimeout(700);
+  const prof = await page.evaluate(() => {
+    const el = document.querySelector('.leaflet-popup-content .popup-ins');
+    if (!el) return null;
+    return {
+      title: el.querySelector('h3').textContent,
+      segs: el.querySelectorAll('.ins-stack .ins-seg').length,
+      stackLabel: (el.querySelector('.ins-stack') || { getAttribute: () => '' }).getAttribute('aria-label'),
+      legend: [...el.querySelectorAll('.ins-legend tr:not(.ins-sub)')].map(tr => [tr.cells[0].textContent.trim(), tr.cells[1].textContent.trim()]),
+      dual: (el.querySelector('.ins-legend tr.ins-sub td.num') || {}).textContent,
+      bars: [...el.querySelectorAll('.ins-bars .num')].map(x => x.textContent.trim()),
+      tables: [...el.querySelectorAll('.ins-tbl a')].map(a => a.href),
+      cite: [...el.querySelectorAll('.ins-cite a')].map(a => a.href)
+    };
+  });
+  const wantLegend = INS.payers.map(p => [p.label, pct1(kv(p.field))]);
+  assert(prof && prof.title === 'King County' && JSON.stringify(prof.legend) === JSON.stringify(wantLegend) && prof.dual === pct1(kv('pmDual')) &&
+    prof.segs === INS.payers.filter(p => kv(p.field) >= 0.05).length,
+    'a county profile shows its payer mix as a bar and lists every share from the data: ' + JSON.stringify(prof && prof.legend));
+  assert(prof && JSON.stringify(prof.bars) === JSON.stringify(INS.sources.map(x => pct1(kv(x.field)))),
+    'and its insurance sources, one bar per coverage type: ' + JSON.stringify(prof && prof.bars));
+  assert(prof && JSON.stringify(prof.tables) === JSON.stringify(INS.sources.map(x => tableUrl(TABLES[x.field], '53033'))) &&
+    prof.cite.includes(tableUrl('B27010', '53033')) && prof.cite.some(h => /kff\.org/.test(h)),
+    'each figure links its ACS table for this county on data.census.gov, and the payer groups cite KFF');
+  await page.evaluate(() => { WAMAP.map.closePopup(); WAMAP.map.setView([47.6, -122.4], 11, { animate: false }); });
+  await insSel.selectOption('uninsured');
+  await page.waitForTimeout(900);
+}
+
 console.log('· amenities');
 await setToggle('card-amenities', true);
 await page.waitForFunction(() => /places statewide|Could not load/.test(document.querySelector('#card-amenities .status-line').textContent), null, { timeout: 20000 }).catch(() => {});
@@ -1085,13 +1189,14 @@ console.log('· radius & area search');
   let T = (await areasList())[0];
   assert(T.counts.stops === gridWant(T) && gridWant(T) > 20, `transit stops come from the answer for the shape's own box: ${T.counts.stops} (expected ${gridWant(T)})`);
   // Away and back while the far query is slow: its late answer must not land.
+  // (Leftward: the legends on the right can cover a pin dragged that way.)
   tq.delay = 3000; tq.aborted = 0;
-  await drag(await box('.user-pin'), 300, 0);
+  await drag(await box('.user-pin'), -300, 0);
   await page.waitForTimeout(300);
   T = (await areasList())[0];
   assert(T.transit === 'loading' && T.counts.stops == null && /transit loading/.test(T.summary),
     'while a query for a moved shape runs, no stale transit counts are shown: ' + T.summary);
-  await drag(await box('.user-pin'), -300, 0);
+  await drag(await box('.user-pin'), 300, 0);
   await page.waitForTimeout(4000);
   T = (await areasList())[0];
   assert(T.transit === 'ok' && T.counts.stops === gridWant(T), `moved back inside the first answer, the late answer for the far spot is ignored: ${T.counts.stops} stops (expected ${gridWant(T)})`);
@@ -1132,6 +1237,12 @@ console.log('· about modal');
 await page.locator('#about-btn').click();
 assert(await page.locator('#about-modal').isVisible(), 'sources modal opens');
 assert(/Valhalla/.test(await page.locator('#sources-content').textContent()), 'sources content populated');
+await page.waitForTimeout(300); // table links take the data's ACS vintage
+const srcLinks = await page.locator('#sources-content .src-links a').evaluateAll(as => as.map(a => a.href));
+assert(/Payer mix counts each person once/.test(await page.locator('#sources-content').textContent()) &&
+  srcLinks.includes(`https://data.census.gov/table/ACSDT5Y${ACS_COUNTY.vintage}.B27010?g=040XX00US53`) &&
+  srcLinks.some(h => /kff\.org/.test(h)) && srcLinks.some(h => /census\.gov\/topics\/health/.test(h)),
+  'Sources & methodology explains the payer mix and links the ACS table, the Census glossary and KFF: ' + srcLinks.length + ' links');
 await page.locator('#about-close').click();
 
 console.log('· base maps + label sandwich');

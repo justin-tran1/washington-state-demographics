@@ -365,7 +365,8 @@
         for (let i = 0; i < F.length; i++) rec[F[i]] = vals[i];
         rows[geoid] = rec;
       }
-      const result = { vintage: data.vintage, span: data.span, source: data.source, built: data.built, rows };
+      // `insurance.tables` names the ACS table behind each insurance field.
+      const result = { vintage: data.vintage, span: data.span, source: data.source, built: data.built, insurance: data.insurance || null, rows };
       this.vintage = data.vintage;
       this._mem[level] = result;
       return result;

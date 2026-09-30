@@ -75,6 +75,14 @@
       // Passes all-pairs CVD and normal-vision floors on white.
       crimeGroups: { person: '#b94641', property: '#1577b7', society: '#928d27', other: BRAND.cement },
       transit: TRANSIT_COLORS.light,
+      // Payer mix, in bar order. The five payers are CBRE-hue steps that pass
+      // the dataviz checks as adjacent stacked segments (worst CVD ΔE 18.9,
+      // normal-vision 19.3, all >= 3:1 on white); "other" recedes and
+      // "uninsured" stands out as neutrals, with values always listed beside
+      // the bar. Same hue per payer in both themes.
+      payer: { employer: '#355fb2', direct: '#7d7808', medicare: '#9667c1', medicaid: '#d9704d', military: '#9d427e',
+        other: BRAND.cementTint, uninsured: BRAND.darkGrey },
+      insBar: '#557794', insTrack: '#e8eef3',
       noData: BRAND.cementTint,
       hoverOutline: BRAND.darkGreen
     },
@@ -86,6 +94,11 @@
       isochrone: { 5: '#b2b074', 10: '#8e8b47', 15: '#6c681c' },
       crimeGroups: { person: '#a53330', property: '#2b87c8', society: '#9d970d', other: BRAND.sageTint },
       transit: TRANSIT_COLORS.dark,
+      // Worst adjacent CVD ΔE 16.7, normal-vision 19.0, all >= 3:1 on the
+      // dark surface (military re-stepped to clear orange).
+      payer: { employer: '#1d87cd', direct: '#9d970d', medicare: '#9667c1', medicaid: '#d66741', military: '#c42f97',
+        other: '#464f50', uninsured: BRAND.cementTint },
+      insBar: '#8dacc6', insTrack: '#12393c',
       noData: '#2b484a',
       hoverOutline: '#ffffff'
     }
@@ -281,11 +294,87 @@
       value: d => d.pctOwner, desc: 'Owner-occupied share of occupied housing units (ACS table B25003).' }
   ];
 
+  // Health insurance, for the civilian noninstitutionalized population.
+  // Payer mix counts each person once (ACS table B27010, grouped as KFF
+  // does); insurance sources count everyone holding each type of coverage,
+  // alone or with others, so they overlap (ACS tables B27002 and B27003, and
+  // C27004-C27009: the 5-year estimates publish the single-type tables
+  // collapsed). Tables below are defaults: the data file records the table
+  // behind each field, and that is what the map cites.
+  const INSURANCE = {
+    universe: 'civilian noninstitutionalized population',
+    kff: { label: 'KFF, Health Insurance Coverage of the Total Population',
+      url: 'https://www.kff.org/state-health-policy-data/state-indicator/total-population/' },
+    glossary: { label: 'U.S. Census Bureau, Health Insurance Glossary',
+      url: 'https://www.census.gov/topics/health/health-insurance/about/glossary.html' },
+    /** The ACS table behind a field, as the data file records it (else the default). */
+    tableFor(acs, field, fallback) {
+      return (acs && acs.insurance && acs.insurance.tables && acs.insurance.tables[field]) || fallback;
+    },
+    /** Links to each table in "B27010" or "B27010+C27007", on data.census.gov. */
+    tableLinks(tables, vintage, geoid, esc) {
+      return String(tables).split('+').map(t =>
+        `<a href="${esc(this.tableUrl(t, vintage, geoid))}" target="_blank" rel="noopener">${esc(t)}</a>`).join(' + ');
+    },
+    /** data.census.gov table page for an ACS 5-year detailed table, at one area. */
+    tableUrl(table, vintage, geoid) {
+      const g = !geoid ? '040XX00US53' : geoid.length === 5 ? '050XX00US' + geoid : '1400000US' + geoid;
+      return `https://data.census.gov/table/ACSDT5Y${vintage}.${table}?g=${g}`;
+    },
+    payers: [
+      { id: 'employer', field: 'pmEmployer', label: 'Employer-sponsored',
+        desc: 'Coverage through a current or former employer or union (own or a family member\'s), alone or with direct-purchase coverage.' },
+      { id: 'direct', field: 'pmDirect', label: 'Direct-purchase',
+        desc: 'Only a plan bought directly from an insurance company (KFF: "non-group").' },
+      { id: 'medicare', field: 'pmMedicare', label: 'Medicare',
+        desc: 'Medicare without Medicaid: Medicare alone, or with employer or direct-purchase coverage.' },
+      { id: 'medicaid', field: 'pmMedicaid', label: 'Medicaid',
+        desc: 'Everyone with Medicaid or another means-tested public plan (Apple Health in Washington), whatever other coverage they have, dual eligibles included.' },
+      { id: 'military', field: 'pmMilitary', label: 'Military (TRICARE, VA)',
+        desc: 'Only TRICARE/military health coverage, or only VA health care.' },
+      { id: 'other', field: 'pmOther', label: 'Other combinations',
+        desc: 'Coverage combinations table B27010 does not break down and that include no Medicaid, such as Medicare with both employer and direct-purchase coverage, or TRICARE with employer coverage.' },
+      { id: 'uninsured', field: 'pctUninsured', label: 'Uninsured',
+        desc: 'No health insurance coverage (Indian Health Service alone does not count as coverage).' }
+    ],
+    // `label` in the profile's bar list, `metric` as a map metric.
+    sources: [
+      { group: 'Private', field: 'srcPrivate', label: 'Any private', metric: 'Private coverage (any type)', table: 'B27002',
+        what: 'private coverage of any type (employer-based, direct-purchase or TRICARE)' },
+      { group: 'Private', field: 'srcEmployer', label: 'Employer-based', metric: 'Employer-based coverage', table: 'C27004',
+        what: 'employer-based coverage (a current or former employer or union, their own or a family member\'s)' },
+      { group: 'Private', field: 'srcDirect', label: 'Direct-purchase', metric: 'Direct-purchase coverage', table: 'C27005',
+        what: 'a plan bought directly from an insurance company' },
+      { group: 'Private', field: 'srcTricare', label: 'TRICARE/military', metric: 'TRICARE/military coverage', table: 'C27008',
+        what: 'TRICARE or other military health coverage' },
+      { group: 'Public', field: 'srcPublic', label: 'Any public', metric: 'Public coverage (any type)', table: 'B27003',
+        what: 'public coverage of any type (Medicare, Medicaid/means-tested or VA)' },
+      { group: 'Public', field: 'srcMedicare', label: 'Medicare', metric: 'Medicare coverage', table: 'C27006', what: 'Medicare' },
+      { group: 'Public', field: 'srcMedicaid', label: 'Medicaid/means-tested', metric: 'Medicaid/means-tested coverage', table: 'C27007',
+        what: 'Medicaid or another means-tested public plan (Apple Health in Washington)' },
+      { group: 'Public', field: 'srcVA', label: 'VA health care', metric: 'VA health care', table: 'C27009', what: 'VA health care' }
+    ]
+  };
+
+  const PM = 'Payer mix (each person counted once)', SRC = 'Insurance sources (any coverage of the type)';
   const INSURANCE_METRICS = [
-    { id: 'uninsured', label: 'Uninsured rate', unit: '%', fmt: 'pct1',
+    { id: 'uninsured', group: 'Coverage', label: 'Uninsured rate', unit: '%', fmt: 'pct1', table: 'B27010', field: 'pctUninsured',
       value: d => d.pctUninsured, desc: 'Civilian noninstitutionalized population without health insurance coverage (ACS detailed table B27010; the same measure as subject table S2701).' },
-    { id: 'insured', label: 'Insured rate', unit: '%', fmt: 'pct1',
-      value: d => d.pctInsured, desc: 'Civilian noninstitutionalized population with health insurance coverage (ACS detailed table B27010; the same measure as subject table S2701).' }
+    { id: 'insured', group: 'Coverage', label: 'Insured rate', unit: '%', fmt: 'pct1', table: 'B27010', field: 'pctInsured',
+      value: d => d.pctInsured, desc: 'Civilian noninstitutionalized population with health insurance coverage (ACS detailed table B27010; the same measure as subject table S2701).' },
+    ...INSURANCE.payers.filter(p => p.id !== 'uninsured').map(p => ({
+      id: 'pm-' + p.id, group: PM, label: 'Payer mix: ' + p.label, short: p.label, tip: p.label + ' (payer mix)', unit: '%', fmt: 'pct1', table: 'B27010', field: p.field,
+      note: 'each person counted once', value: d => d[p.field],
+      desc: p.desc + ' Each person is counted once, in payer groups as KFF defines them (ACS tables B27010 and, for Medicaid, C27007; the legend links them; see Sources & methodology).'
+    })),
+    { id: 'pm-dual', group: PM, label: 'Payer mix: dual eligible (Medicare and Medicaid only)', short: 'Dual eligible (Medicare and Medicaid only)', tip: 'Dual eligible (Medicare and Medicaid only)', unit: '%', fmt: 'pct1', table: 'B27010', field: 'pmDual',
+      note: 'part of the Medicaid share', value: d => d.pmDual,
+      desc: 'People whose coverage is Medicare and Medicaid and nothing else, part of the Medicaid share (ACS table B27010; dual eligibles who also hold a third type are not separated).' },
+    ...INSURANCE.sources.map(s => ({
+      id: 'src-' + s.field.slice(3).toLowerCase(), group: SRC, label: s.metric, short: s.label, unit: '%', fmt: 'pct1', table: s.table, field: s.field,
+      note: 'alone or with other coverage, so shares overlap', value: d => d[s.field],
+      desc: `Share of people with ${s.what}, alone or with other coverage, so these shares add up to more than 100% (ACS table ${s.table}; the legend names the table used).`
+    }))
   ];
 
   // -------------------------------------------------------------- geocoding
@@ -561,11 +650,23 @@
 
   // ---------------------------------------------------------------- sources
   const SOURCES = [
-    { section: 'Demographics & health insurance', items: [
+    { section: 'Demographics', items: [
       'U.S. Census Bureau, American Community Survey (ACS) 5-Year Estimates for every Washington county and census tract. A GitHub Action reads the Census Bureau\'s keyless ACS Summary Files each month and publishes them with the map, so the browser never calls the Census API (which has required an API key since May 2026). The vintage in use is shown in the layer legend; the newest published vintage is picked up automatically.',
-      'Health insurance coverage: ACS detailed table B27010 (health insurance by age, civilian noninstitutionalized population) - the uninsured share is the "no health insurance coverage" lines over the table universe, the same measure as subject table S2701.',
       'Land area and tract names: U.S. Census Bureau Gazetteer files. Boundaries: Census cartographic boundary files (1:500,000, clipped to the shoreline), pre-built with the map; TIGERweb is the fallback.',
       'Median values are ACS estimates and carry margins of error; small tracts have wider error bands. Values suppressed by the Census Bureau are shown as "no data".'
+    ]},
+    { section: 'Health insurance', items: [
+      'U.S. Census Bureau, American Community Survey 5-Year Estimates, for every county and census tract: detailed table B27010 (types of health insurance coverage by age); B27002 and B27003 (private and public health insurance by sex by age); and C27004 to C27009 (employer-based, direct-purchase, Medicare, Medicaid/means-tested, TRICARE/military and VA health coverage by sex by age; the 5-year estimates publish these single-type tables with collapsed age groups, as C tables). Universe: the civilian noninstitutionalized population, so active-duty military and people living in institutions are not included. Each area\'s profile links its tables on data.census.gov.',
+      'Coverage types follow the Census Bureau\'s definitions (Health Insurance Glossary, census.gov): employer-based coverage comes through a current or former employer or union, the person\'s own or a family member\'s; direct-purchase is bought directly from an insurance company; TRICARE and other military coverage count as private; Medicare, Medicaid and other means-tested plans (Apple Health in Washington) and VA health care count as public. People whose only coverage is the Indian Health Service are counted as uninsured.',
+      'Insurance sources count everyone holding each type of coverage, alone or with other types, so they add up to more than 100%. The uninsured share is the "no health insurance coverage" lines of B27010 over its universe, the same measure as subject table S2701.',
+      'Payer mix counts each person once, following the hierarchy KFF uses for "Health Insurance Coverage of the Total Population" (kff.org). Medicaid is everyone with Medicaid or other means-tested coverage, whatever else they have, dual eligibles included (table C27007). The other groups come from the coverage combinations in table B27010: Medicare alone or with employer or direct-purchase coverage is counted under Medicare; employer coverage alone or with direct-purchase under employer-sponsored; direct-purchase alone under direct-purchase; TRICARE or VA alone under military. KFF also counts full-time workers who have both Medicare and employer coverage as employer-covered; the ACS tables carry no work status, so they are counted under Medicare here. Combinations that B27010 groups without naming the types, less the Medicaid holders among them, are shown as "other combinations" (for example Medicare with both employer and direct-purchase coverage, or TRICARE with employer coverage). KFF works from ACS microdata, so its Washington figures will not match these exactly.',
+      'Tract estimates come from small samples and carry wide margins of error; data.census.gov shows the margin for each value.'
+    ], links: [
+      // `table`: linked on data.census.gov at the ACS vintage the map uses.
+      { label: 'ACS table B27010 for Washington (data.census.gov)', table: 'B27010' },
+      { label: 'U.S. Census Bureau Health Insurance Glossary', url: 'https://www.census.gov/topics/health/health-insurance/about/glossary.html' },
+      { label: 'KFF: Health Insurance Coverage of the Total Population', url: 'https://www.kff.org/state-health-policy-data/state-indicator/total-population/' },
+      { label: 'ACS Summary File', url: 'https://www.census.gov/programs-surveys/acs/data/summary-file.html' }
     ]},
     { section: 'Amenities', items: [
       'Every category is pulled for the whole state each month (no per-view caps or zoom limits) and merged from authoritative registries first, then OpenStreetMap to fill gaps. A point that duplicates one already kept is dropped: the same name nearby (town names, health-system brands and store numbers do not count, and the radius widens for address-geocoded registries and large parks), or the same kind of place at the same spot (clinics, pharmacies, banks and fuel stations within 30-45 m whatever their names, since registries and OpenStreetMap often name one place differently; hospitals, grocery stores and parks beyond 30 or 10 m only when their names share a word). Hover a category in the panel to see how many places each source contributed.',
@@ -612,7 +713,7 @@
 
   WAMAP.CONFIG = {
     PALETTE, MAP, BASEMAPS, BASEMAP_GROUPS, LABEL_LAYERS, CENSUS, TIGERWEB, DEMO_METRICS, INSURANCE_METRICS,
-    GEOCODE, OVERPASS, AMENITIES, AMENITIES_DEFAULT_ON, AMENITY_DATA_DIR, TRANSIT, CRIME, ISOCHRONE, AREAS, SOURCES,
+    INSURANCE, GEOCODE, OVERPASS, AMENITIES, AMENITIES_DEFAULT_ON, AMENITY_DATA_DIR, TRANSIT, CRIME, ISOCHRONE, AREAS, SOURCES,
     SQMI_PER_SQM
   };
 })();

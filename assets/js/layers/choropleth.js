@@ -116,6 +116,7 @@
 
   // --------------------------------------------------------------- engine
   WAMAP.createChoropleth = function (opts) {
+    // opts.profile(ctx), when given, builds the popup for a clicked area.
     const { id, metrics, rampKey, map, card } = opts;
     // Colors resolve per theme at draw time, never captured at construction.
     const ramp = () => U.theme.colors()[rampKey];
@@ -139,8 +140,12 @@
 
     // ---- panel UI -------------------------------------------------------
     const body = card.querySelector('.card-body');
-    const metricSel = U.el('select', { class: 'input', 'aria-label': 'Metric' },
-      metrics.map(m => U.el('option', { value: m.id, text: m.label })));
+    // Metrics with a `group` are listed under it (option text `short`).
+    const option = m => U.el('option', { value: m.id, text: m.short || m.label });
+    const groups = [...new Set(metrics.map(m => m.group).filter(Boolean))];
+    const metricSel = U.el('select', { class: 'input', 'aria-label': 'Metric' }, groups.length
+      ? groups.map(g => U.el('optgroup', { label: g }, metrics.filter(m => m.group === g).map(option)))
+      : metrics.map(option));
     const desc = U.el('div', { class: 'hint' });
     const opacityRow = U.el('div', { class: 'row-inline' }, [
       U.el('label', { class: 'mini-label', text: 'Opacity' }),
@@ -247,10 +252,10 @@
             const v = valueFor(geoid, acs, f);
             const name = (row && row.name ? row.name.split(';')[0] : f.properties.NAME) || geoid;
             lyr.bindTooltip(
-              `<strong>${U.escapeHTML(name)}</strong><br>${U.escapeHTML(state.metric.label)}: ${U.fmt.by(state.metric.fmt, v)}`,
+              `<strong>${U.escapeHTML(name)}</strong><br>${U.escapeHTML(state.metric.tip || state.metric.label)}: ${U.fmt.by(state.metric.fmt, v)}`,
               { sticky: true, direction: 'top', opacity: 0.95 });
             lyr.on('click', e => {
-              L.popup({ maxWidth: 340 })
+              L.popup(Object.assign({ maxWidth: 340 }, opts.popupOptions))
                 .setLatLng(e.latlng)
                 .setContent(profileHTML(geoid, f, acs))
                 .openOn(map);
@@ -280,6 +285,7 @@
       const aland = row && row.aland > 0 ? row.aland
         : (feature.properties.AREALAND != null ? feature.properties.AREALAND : geoStore.alandOf(geoid));
       const withArea = row ? Object.assign({}, row, { aland }) : null;
+      if (opts.profile) return opts.profile({ geoid, name, row: withArea, acs, level: geoid.length === 5 ? 'county' : 'tract' });
       const lines = [];
       const push = (label, val) => lines.push(
         `<tr><td>${U.escapeHTML(label)}</td><td class="num">${val}</td></tr>`);
@@ -287,7 +293,7 @@
         for (const m of CFG.DEMO_METRICS) push(m.label, U.fmt.by(m.fmt, m.value(withArea)));
         push('Per-capita income', U.fmt.money(withArea.perCap));
         push('Households', U.fmt.int(withArea.households));
-        for (const m of CFG.INSURANCE_METRICS) push(m.label, U.fmt.by(m.fmt, m.value(withArea)));
+        for (const m of CFG.INSURANCE_METRICS.filter(x => x.group === 'Coverage')) push(m.label, U.fmt.by(m.fmt, m.value(withArea)));
         if (aland > 0) push('Land area', U.fmt.sqmi(aland * CFG.SQMI_PER_SQM));
       } else {
         lines.push('<tr><td colspan="2">No ACS data for this area.</td></tr>');
@@ -304,12 +310,19 @@
       const rows = ramp().map((c, i) =>
         `<div class="legend-row"><span class="swatch" style="background:${c}"></span>` +
         `<span>${f(stops[i])} – ${f(stops[i + 1])}</span></div>`).join('');
+      // A metric that names its ACS table cites it, linked on data.census.gov.
+      const m = state.metric;
+      const table = m.table && CFG.INSURANCE ? CFG.INSURANCE.tableFor(acs, m.field, m.table) : null;
+      const src = table
+        ? `ACS 5-Year ${acs.span}, U.S. Census Bureau, ${table.includes('+') ? 'tables' : 'table'} ${CFG.INSURANCE.tableLinks(table, acs.vintage, null, U.escapeHTML)}`
+        : `ACS 5-Year ${acs.span}, U.S. Census Bureau`;
       legendBox.innerHTML =
-        `<div class="legend-title">${U.escapeHTML(state.metric.label)}</div>` +
+        `<div class="legend-title">${U.escapeHTML(m.label)}</div>` +
+        (m.note ? `<div class="legend-sub">${U.escapeHTML(m.note)}</div>` : '') +
         `<div class="legend-sub">${level === 'tract' ? 'by census tract' : 'by county'} · ${ramp().length} equal-count classes statewide</div>` +
         rows +
         `<div class="legend-row"><span class="swatch" style="background:${noData()}"></span><span>No data</span></div>` +
-        `<div class="legend-src">ACS 5-Year ${acs.span}, U.S. Census Bureau</div>`;
+        `<div class="legend-src">${src}</div>`;
       legendBox.style.display = '';
     }
 
