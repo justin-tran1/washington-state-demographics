@@ -397,6 +397,42 @@ const phPopup = await page.evaluate(([lat, lon]) => {
 assert(phPopup && phPopup.includes(ph[2]) && /Source:/.test(phPopup), 'pharmacy popup renders: ' + (phPopup || '').replace(/\s+/g, ' ').slice(0, 140));
 await page.evaluate(() => { WAMAP.map.closePopup(); document.getElementById('amen-pharmacy').click(); WAMAP.map.setView([47.6, -122.4], 11, { animate: false }); });
 await page.waitForTimeout(800);
+// Markers in the cluster groups whose icons match `re`, read once the count
+// has held for 1.5 s (batched adds still running would change it).
+async function settledMarkers(re) {
+  const count = () => page.evaluate(src => {
+    let n = 0;
+    WAMAP.map.eachLayer(l => {
+      if (!(l instanceof L.MarkerClusterGroup)) return;
+      const ls = l.getLayers();
+      if (ls.length && new RegExp(src).test(ls[0].options.icon.options.html)) n += ls.length;
+    });
+    return n;
+  }, re.source);
+  let last = -1;
+  for (let i = 0, same = 0; i < 60 && same < 5; i++) {
+    await page.waitForTimeout(300);
+    const n = await count();
+    same = n === last ? same + 1 : 0;
+    last = n;
+  }
+  return last;
+}
+// A category switched off while its markers are still being added must not
+// leave any behind. Retail (~20,000 markers) is loaded first; then, with the
+// CPU slowed so one add spans several batches, it is switched on and straight
+// off again. The plugin's own chunkedLoading fails this check.
+const cdp = await page.context().newCDPSession(page);
+await page.evaluate(() => { document.getElementById('amen-retail').click(); });
+await page.waitForFunction(() => /\d/.test(document.getElementById('amen-count-retail').textContent), null, { timeout: 30000 });
+await page.evaluate(() => { document.getElementById('amen-retail').click(); });
+const amenBefore = await settledMarkers(/poi-chip/);
+await cdp.send('Emulation.setCPUThrottlingRate', { rate: 8 });
+await page.evaluate(() => { const cb = document.getElementById('amen-retail'); cb.click(); cb.click(); });
+await cdp.send('Emulation.setCPUThrottlingRate', { rate: 1 });
+const amenAfter = await settledMarkers(/poi-chip/);
+assert(amenBefore > 1000 && amenAfter === amenBefore,
+  `a category switched off mid-load leaves no markers behind (${amenAfter} markers, ${amenBefore} before)`);
 
 console.log('· transit');
 await setToggle('card-transit', true);
@@ -511,24 +547,27 @@ assert(/Agency website/.test(await page.evaluate(() => { const c = document.quer
 const areaClick = await clickWhere('area');
 assert(areaClick && !/WASPC|Agency:/.test(areaClick), 'a click on a census area opens its profile with transit and crime on');
 await page.evaluate(() => { WAMAP.map.closePopup(); });
-// Rapid category toggles while ~18,000 pre-geocoded markers are still being
-// added must not leave stale or duplicate markers behind.
-await page.evaluate(() => { WAMAP.map.setView([47.3, -120.5], 7, { animate: false }); });
-for (let i = 0; i < 6; i++) { await page.locator('#crime-cat-theft').click(); await page.waitForTimeout(15); }
-await page.waitForTimeout(3000);
-const crimeMarkers = await page.evaluate(() => {
-  let n = 0;
-  WAMAP.map.eachLayer(l => {
-    if (!(l instanceof L.MarkerClusterGroup)) return;
-    const ls = l.getLayers();
-    if (ls.length && /crime-dot/.test(ls[0].options.icon.options.html)) n += ls.length;
-  });
+// Category toggles while ~18,000 pre-geocoded markers are still being added
+// must not leave stale or duplicate markers behind. With the CPU slowed, one
+// full add spans several batches; the toggles run back to back and leave
+// theft off, so a batch left running by an earlier render shows up as extra
+// (theft) markers. The plugin's own chunkedLoading fails this check.
+await cdp.send('Emulation.setCPUThrottlingRate', { rate: 8 });
+await page.evaluate(() => {
+  WAMAP.map.setView([47.3, -120.5], 7, { animate: false });
+  const chip = document.getElementById('crime-cat-theft');
+  for (let i = 0; i < 5; i++) chip.click();
+});
+await cdp.send('Emulation.setCPUThrottlingRate', { rate: 1 });
+const crimeMarkers = await settledMarkers(/crime-dot/);
+const crimeWant = await page.evaluate(() => {
   let want = 0;
   for (const c of WAMAP.CONFIG.CRIME.categories) want += +(document.getElementById('crime-count-' + c.id).textContent.replace(/\D/g, '') || 0);
-  return { n, want };
+  return want;
 });
-assert(crimeMarkers.n > 1000 && crimeMarkers.n === crimeMarkers.want,
-  `no duplicate crime markers after rapid toggles: ${crimeMarkers.n} markers for ${crimeMarkers.want} incidents`);
+assert(crimeMarkers > 1000 && crimeMarkers === crimeWant,
+  `no stale or duplicate crime markers after rapid toggles: ${crimeMarkers} markers for ${crimeWant} incidents`);
+await page.locator('#crime-cat-theft').click(); // theft back on for the checks below
 await page.evaluate(() => { WAMAP.map.setView([47.6, -122.4], 11, { animate: false }); });
 await page.waitForTimeout(600);
 // Count check on Seattle alone: switch every other incident feed off.
