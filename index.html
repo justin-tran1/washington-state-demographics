@@ -51,6 +51,7 @@
       <section class="side-section tool-row">
         <button id="pin-mode-btn" class="btn tool" type="button" title="Toggle pin mode, then click the map (Esc to exit)">📌 Drop pins <span id="pin-count" class="pill"></span></button>
         <button id="pin-clear-btn" class="btn tool ghost" type="button">Clear pins</button>
+        <button id="draw-area-btn" class="btn tool ghost" type="button" title="Draw an area on the map and list everything inside it (Esc to stop)">⬠ Draw area</button>
         <button id="locate-btn" class="btn tool ghost" type="button">🧭 My location</button>
         <button id="home-btn" class="btn tool ghost" type="button">🏠 Washington</button>
         <button id="share-btn" class="btn tool ghost" type="button" title="Copy a link that restores this view, basemap, layers and drive-time origin">🔗 Copy link</button>
@@ -74,6 +75,14 @@
           <div class="card-head">
             <span class="card-title">🚗 Drive-time areas <span class="tag">5 / 10 / 15 min</span></span>
             <label class="card-toggle switch" title="Show/hide"><input type="checkbox"><span class="knob"></span></label>
+          </div>
+          <div class="card-body"></div>
+        </div>
+
+        <div class="layer-card" id="card-areas">
+          <div class="card-head">
+            <span class="card-title">📐 Radius &amp; area search <span class="tag">amenities + transit</span></span>
+            <label class="card-toggle switch" title="Show/hide shapes"><input type="checkbox"><span class="knob"></span></label>
           </div>
           <div class="card-body"></div>
         </div>
@@ -166,6 +175,7 @@
   <script src="assets/js/layers/transit.js"></script>
   <script src="assets/js/layers/crime.js"></script>
   <script src="assets/js/layers/drivetime.js"></script>
+  <script src="assets/js/layers/areas.js"></script>
   <script src="assets/js/app.js"></script>
 </body>
 </html>

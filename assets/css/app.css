@@ -282,6 +282,98 @@ select.input { cursor: pointer; }
 .dt-table td:first-child { display: flex; align-items: center; gap: 5px; white-space: nowrap; }
 .dt-table .num { text-align: right; font-variant-numeric: tabular-nums; }
 
+/* radius & area search */
+.btn:disabled { opacity: .45; cursor: default; filter: none; }
+.area-actions { flex-wrap: wrap; }
+.area-list { display: flex; flex-direction: column; gap: 8px; }
+.area-entry {
+  border: 1px solid var(--hairline); border-radius: 8px; background: var(--surface);
+}
+.area-entry.flash { animation: area-flash 1.2s ease-out; }
+@keyframes area-flash { from { box-shadow: 0 0 0 3px var(--accent); } to { box-shadow: 0 0 0 0 transparent; } }
+.area-entry.hidden-shape .area-title { color: var(--muted); }
+.area-head { display: flex; align-items: center; gap: 6px; padding: 6px 6px 6px 8px; }
+.area-swatch { width: 12px; height: 12px; border-radius: 3px; flex: 0 0 auto; border: 1px solid var(--swatch-ring); display: inline-block; }
+.area-title {
+  flex: 1; min-width: 0; border: none; background: none; color: var(--ink); font: inherit; font-weight: 600;
+  font-size: 13px; text-align: left; cursor: pointer; padding: 2px 0;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.area-tools { display: flex; gap: 3px; flex: 0 0 auto; }
+.area-icon-btn { width: 26px; height: 26px; font-size: 13px; border-radius: 6px; padding: 0; }
+.area-icon-btn[aria-pressed="true"] { background: var(--accent); color: var(--accent-on); border-color: var(--accent); }
+.area-body { display: flex; flex-direction: column; gap: 7px; padding: 2px 8px 8px; border-top: 1px solid var(--hairline); }
+.area-entry.collapsed .area-body { display: none; }
+.area-row { display: flex; align-items: center; gap: 6px; }
+.area-row .mini-label { min-width: 86px; }
+.area-radius { max-width: 96px; }
+.area-unit { max-width: 64px; flex: 0 0 auto; }
+.area-style { display: flex; flex-direction: column; gap: 5px; }
+.area-style select.input { flex: 0 1 auto; width: auto; }
+.area-color { width: 34px; height: 26px; padding: 0; border: 1px solid var(--baseline); border-radius: 6px; background: none; cursor: pointer; flex: 0 0 auto; }
+.area-pct { min-width: 36px; text-align: right; font-size: 11.5px; color: var(--ink-2); font-variant-numeric: tabular-nums; }
+.area-summary-row { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.area-summary { font-size: 12px; font-weight: 600; color: var(--ink); }
+.area-results { display: flex; flex-direction: column; }
+.area-group { border-top: 1px solid var(--hairline); }
+.area-group > summary {
+  display: flex; align-items: center; gap: 7px; cursor: pointer; padding: 6px 2px; font-size: 12.5px; list-style: none;
+}
+.area-group > summary::-webkit-details-marker { display: none; }
+.area-group > summary::before { content: "▸"; color: var(--muted); font-size: 10px; width: 8px; }
+.area-group[open] > summary::before { content: "▾"; }
+.area-group-label { flex: 1; min-width: 0; }
+.area-items { max-height: 280px; overflow-y: auto; display: flex; flex-direction: column; padding-bottom: 6px; }
+.area-item {
+  display: flex; align-items: center; gap: 8px; width: 100%; text-align: left; cursor: pointer;
+  border: none; background: none; color: var(--ink); font: inherit; padding: 4px 4px; border-radius: 6px;
+}
+.area-item:hover, .area-item:focus-visible { background: var(--plane); }
+.area-item-emoji { width: 18px; text-align: center; flex: 0 0 auto; font-size: 13px; }
+.area-item .mode-line { flex: 0 0 auto; width: 18px; }
+.area-item-main { display: flex; flex-direction: column; min-width: 0; }
+.area-item-name { font-size: 12.5px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.area-item-meta { font-size: 11px; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.area-more { align-self: flex-start; margin: 4px 0 0 26px; }
+.pin-areas { margin-top: 6px; display: flex; flex-direction: column; gap: 3px; }
+.pin-area-line { display: flex; align-items: center; gap: 6px; font-size: 12px; }
+.pin-area-line a { color: var(--accent-ink); }
+
+/* on the map */
+.area-handle-icon, .area-label-icon, .area-vertex-icon { background: none; border: none; }
+.area-handle {
+  display: block; width: 16px; height: 16px; border-radius: 50%; background: #fff;
+  border: 3px solid; box-shadow: 0 1px 4px rgba(0, 0, 0, .45); cursor: grab;
+}
+.area-handle-label {
+  position: absolute; left: 20px; top: -1px; white-space: nowrap; pointer-events: none;
+  background: var(--surface); color: var(--ink); border: 1px solid var(--hairline); border-radius: 999px;
+  padding: 0 7px; font-size: 11px; font-weight: 600; line-height: 17px; box-shadow: var(--shadow);
+}
+.area-label {
+  display: inline-block; transform: translate(-50%, -50%); white-space: nowrap; cursor: pointer;
+  background: color-mix(in srgb, var(--surface) 92%, transparent); color: var(--ink);
+  border: 2px solid; border-radius: 999px; padding: 1px 9px; font-size: 11.5px; font-weight: 700;
+  box-shadow: 0 1px 4px rgba(0, 0, 0, .3); max-width: 240px; overflow: hidden; text-overflow: ellipsis;
+}
+.area-vertex {
+  display: block; width: 14px; height: 14px; border-radius: 3px; background: #fff;
+  border: 2.5px solid; box-shadow: 0 1px 3px rgba(0, 0, 0, .45); cursor: move;
+}
+.area-mid {
+  display: block; width: 12px; height: 12px; border-radius: 50%; background: #fff;
+  border: 2px solid; opacity: .8; cursor: copy;
+}
+.draw-capture { position: absolute; inset: 0; z-index: 690; cursor: crosshair; background: transparent; touch-action: none; }
+.draw-bar {
+  /* centred without a transform, so its available width is the whole map */
+  position: absolute; top: 10px; left: 0; right: 0; margin: 0 auto; width: max-content; z-index: 1050;
+  display: flex; align-items: center; gap: 6px; flex-wrap: wrap; justify-content: center;
+  background: var(--surface); color: var(--ink); border: 1px solid var(--hairline); border-radius: 10px;
+  padding: 6px 8px; box-shadow: var(--shadow); font-size: 12px; max-width: calc(100% - 120px);
+}
+.draw-bar-text { color: var(--ink-2); padding: 0 4px; }
+
 /* ------------------------------------------------------------- legends */
 #legend-host {
   position: absolute; right: 10px; bottom: 26px; z-index: 1000;

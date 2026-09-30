@@ -55,20 +55,23 @@
     window.addEventListener('unhandledrejection', () => { /* per-layer status lines handle their own errors */ });
 
     // ------------------------------------------------------------- modes
-    // One interaction mode at a time (pin dropping / drive-time origin pick).
+    // One interaction mode at a time (pin dropping, drive-time origin pick,
+    // drawing an area). `onCancel` runs when the mode ends for any reason.
     const modes = {
-      active: null, btn: null, cb: null, once: true,
-      request(name, btn, cb, once = true) {
+      active: null, btn: null, cb: null, once: true, onCancel: null,
+      request(name, btn, cb, once = true, onCancel = null) {
         if (this.active === name) { this.cancel(); return; }
         this.cancel();
-        this.active = name; this.btn = btn; this.cb = cb; this.once = once;
+        this.active = name; this.btn = btn; this.cb = cb; this.once = once; this.onCancel = onCancel;
         if (btn) btn.classList.add('active');
         map.getContainer().classList.add('crosshair');
       },
       cancel() {
+        const hook = this.onCancel;
         if (this.btn) this.btn.classList.remove('active');
-        this.active = null; this.btn = null; this.cb = null;
+        this.active = null; this.btn = null; this.cb = null; this.onCancel = null;
         map.getContainer().classList.remove('crosshair');
+        if (hook) hook();
       },
       handleClick(ll) {
         if (!this.active) return false;
@@ -205,45 +208,65 @@
     });
 
     // ------------------------------------------------------------- pins
+    // Pins keep their id across reloads, so the radius searches drawn around
+    // them (layers/areas.js) find them again. That module follows pins
+    // through WAMAP.pins events: 'move' (id, lat, lon, final), 'remove' (id)
+    // and 'label' (id).
     const pinLayer = L.layerGroup().addTo(map);
     const pins = new Map(); // id -> {marker, data}
     const savedPins = U.store.get('pins') || [];
+    const pinListeners = {};
+    const emitPin = (type, ...args) => { for (const fn of (pinListeners[type] || [])) fn(...args); };
+    WAMAP.pins = {
+      get(id) { const p = pins.get(id); return p ? p.data : null; },
+      on(type, fn) { (pinListeners[type] = pinListeners[type] || []).push(fn); }
+    };
 
     function pinPopup(id, data) {
       return U.el('div', { class: 'popup-poi' }, [
         U.el('h3', { text: data.label || 'Dropped pin' }),
         U.el('div', { class: 'popup-src', text: data.lat.toFixed(5) + ', ' + data.lon.toFixed(5) }),
+        WAMAP.areas ? WAMAP.areas.pinPopupSection(id) : null,
         U.el('div', { class: 'popup-actions' }, [
           U.el('button', { class: 'btn mini', text: '🚗 Drive times from here', onclick: () => { WAMAP.driveTime.setOrigin(data.lat, data.lon, data.label || 'pin'); map.closePopup(); } }),
           U.el('button', { class: 'btn mini ghost', text: '🗑 Remove pin', onclick: () => removePin(id) })
         ])
       ]);
     }
-    function addPin(lat, lon, label) {
-      const id = 'p' + Date.now() + Math.random().toString(36).slice(2, 6);
-      const data = { lat, lon, label: label || null };
+    function labelPin(id, data, lat, lon) {
+      U.geocode.reverse(lat, lon).then(n => {
+        if (!n || !pins.has(id) || data.lat !== lat || data.lon !== lon) return;
+        data.label = n.split(',').slice(0, 3).join(',');
+        savePins();
+        emitPin('label', id);
+      });
+    }
+    function addPin(lat, lon, label, savedId) {
+      const id = typeof savedId === 'string' && /^p[\w-]{3,40}$/.test(savedId) && !pins.has(savedId)
+        ? savedId : 'p' + Date.now() + Math.random().toString(36).slice(2, 6);
+      const data = { id, lat, lon, label: label || null };
       const marker = L.marker([lat, lon], {
         draggable: true,
         icon: L.divIcon({ className: 'poi-icon', html: '<span class="user-pin"></span>', iconSize: [22, 30], iconAnchor: [11, 28], popupAnchor: [0, -24] })
       }).addTo(pinLayer);
       marker.bindPopup(() => pinPopup(id, data), { maxWidth: 300 });
+      marker.on('drag', () => { const ll = marker.getLatLng(); emitPin('move', id, ll.lat, ll.lng, false); });
       marker.on('dragend', () => {
         const ll = marker.getLatLng();
         data.lat = ll.lat; data.lon = ll.lng; data.label = null;
         savePins();
-        U.geocode.reverse(ll.lat, ll.lng).then(n => { if (n) { data.label = n.split(',').slice(0, 3).join(','); savePins(); } });
+        emitPin('move', id, ll.lat, ll.lng, true);
+        labelPin(id, data, ll.lat, ll.lng);
       });
       pins.set(id, { marker, data });
       savePins();
-      if (!label) {
-        U.geocode.reverse(lat, lon).then(n => { if (n) { data.label = n.split(',').slice(0, 3).join(','); savePins(); } });
-      }
+      if (!label) labelPin(id, data, lat, lon);
       updatePinCount();
       return id;
     }
     function removePin(id) {
       const p = pins.get(id);
-      if (p) { pinLayer.removeLayer(p.marker); pins.delete(id); savePins(); updatePinCount(); }
+      if (p) { pinLayer.removeLayer(p.marker); pins.delete(id); savePins(); updatePinCount(); emitPin('remove', id); }
     }
     function savePins() {
       U.store.set('pins', Array.from(pins.values()).map(p => p.data));
@@ -251,7 +274,7 @@
     function updatePinCount() {
       U.$('#pin-count').textContent = pins.size ? String(pins.size) : '';
     }
-    for (const p of savedPins) if (p && isFinite(p.lat)) addPin(p.lat, p.lon, p.label);
+    for (const p of savedPins) if (p && isFinite(p.lat) && isFinite(p.lon)) addPin(+p.lat, +p.lon, p.label, p.id);
 
     const pinBtn = U.$('#pin-mode-btn');
     pinBtn.addEventListener('click', () => {
@@ -260,6 +283,7 @@
     U.$('#pin-clear-btn').addEventListener('click', () => {
       for (const id of Array.from(pins.keys())) removePin(id);
     });
+    U.$('#draw-area-btn').addEventListener('click', () => { if (WAMAP.areas) WAMAP.areas.startDraw(); });
 
     // -------------------------------------------------------- locate/home
     U.$('#home-btn').addEventListener('click', () => {
@@ -287,6 +311,9 @@
     layers.transit = WAMAP.createTransit({ map, card: U.$('#card-transit') });
     layers.crime = WAMAP.createCrime({ map, card: U.$('#card-crime') });
     layers.drivetime = WAMAP.createDriveTime({ map, card: U.$('#card-drivetime') });
+    layers.areas = WAMAP.createAreas({
+      map, card: U.$('#card-areas'), amenities: layers.amenities, transit: layers.transit
+    });
 
     for (const [id, inst] of Object.entries(layers)) {
       const card = U.$('#card-' + id);
@@ -303,6 +330,9 @@
         card.classList.toggle('collapsed');
       });
     }
+    // Saved circles and areas, once the pins they belong to and the card's
+    // toggle are in place.
+    layers.areas.restore();
 
     // ------------------------------------------- shareable URL state (#hash)
     // View, basemap, active layers, choropleth metrics and the drive-time

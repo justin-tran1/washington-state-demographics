@@ -541,6 +541,24 @@
     generalize: 60
   };
 
+  // ------------------------------------------------- radius & area search
+  const AREAS = {
+    defaultRadiusM: 1609.344,   // 1 mile, the usual first trade-area ring
+    minRadiusM: 10,
+    maxRadiusM: 80467,          // 50 miles
+    units: {
+      mi: { label: 'mi', m: 1609.344 }, km: { label: 'km', m: 1000 },
+      m: { label: 'm', m: 1 }, ft: { label: 'ft', m: 0.3048 }
+    },
+    defaultUnit: 'mi',
+    // New shapes take these in turn: CBRE data colours, mid lightness so an
+    // outline reads on light, dark and imagery base maps alike.
+    colors: ['#3E7CA6', '#D2785A', '#885073', '#0C8E7A', '#AB413C', '#7D7808'],
+    fillOpacity: 0.15,
+    weight: 2,
+    listPage: 100               // result rows shown per group before "Show more"
+  };
+
   // ---------------------------------------------------------------- sources
   const SOURCES = [
     { section: 'Demographics & health insurance', items: [
@@ -572,6 +590,11 @@
       'Estimates reflect typical (free-flow to moderate) conditions, not live congestion. Peak-hour drive times in urban areas can be materially longer.',
       'Population and income inside each band are estimated by allocating whole census tracts whose internal point (Census Gazetteer INTPTLAT/INTPTLONG, always inside the tract) falls inside the band (ACS 5-year data).'
     ]},
+    { section: 'Radius & area search', items: [
+      'A circle around a dropped pin, or a polygon drawn anywhere on the map, lists every amenity point in the statewide amenity files and every transit stop and route (WSDOT statewide GTFS, queried live; Washington State Ferries routes included) that falls inside the shape or touches its edge (a point within half a metre of the edge counts as touching it, since amenity coordinates are published to about a metre). Routes are listed when any part of their line reaches the shape.',
+      'Circle radii are great-circle distances from the pin. Polygon edges are straight lines on the map (Web Mercator), and containment is tested on that same projection, so the list matches the shape as drawn. Areas and perimeters are geodesic estimates.',
+      'Amenities are points (a park is its representative point, not its boundary). Shapes, their styles and their names are stored only in this browser; the CSV export downloads the current list.'
+    ]},
     { section: 'Base maps', items: [
       '16 base maps, all keyless and free to use: OpenStreetMap and OSM Humanitarian; Esri Light/Dark Gray Canvas, World Imagery, Streets and Topographic; USGS The National Map (Imagery, Imagery+Topo, Topo, Shaded Relief, Hydrography); OpenTopoMap; OPNVKarte transit; CyclOSM; and WSDOT\'s Washington base map.',
       'Licensing, in plain terms: the USGS National Map services are U.S. federal works in the public domain with no commercial-use restriction - the cleanest option here, and the reason they are offered alongside the commercial alternatives. The Esri services at server.arcgisonline.com are keyless but are legacy raster layers in Esri Mature Support (cartography frozen around 2021, World Imagery excepted and still maintained); an organisation with an ArcGIS entitlement should point these at its own keyed basemap service. OpenStreetMap and the community servers (OSM France, OpenTopoMap, MeMoMaps) are volunteer-funded and ask that heavy or commercial traffic not lean on them.',
@@ -588,7 +611,7 @@
 
   WAMAP.CONFIG = {
     PALETTE, MAP, BASEMAPS, BASEMAP_GROUPS, LABEL_LAYERS, CENSUS, TIGERWEB, DEMO_METRICS, INSURANCE_METRICS,
-    GEOCODE, OVERPASS, AMENITIES, AMENITIES_DEFAULT_ON, AMENITY_DATA_DIR, TRANSIT, CRIME, ISOCHRONE, SOURCES,
+    GEOCODE, OVERPASS, AMENITIES, AMENITIES_DEFAULT_ON, AMENITY_DATA_DIR, TRANSIT, CRIME, ISOCHRONE, AREAS, SOURCES,
     SQMI_PER_SQM
   };
 })();
