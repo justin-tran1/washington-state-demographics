@@ -305,7 +305,8 @@
     });
     layers.insurance = WAMAP.createChoropleth({
       id: 'insurance', metrics: CFG.INSURANCE_METRICS, rampKey: 'seqSecondary',
-      map, card: U.$('#card-insurance')
+      map, card: U.$('#card-insurance'),
+      profile: WAMAP.insuranceProfile, popupOptions: { maxWidth: 360, minWidth: 300 }
     });
     layers.amenities = WAMAP.createAmenities({ map, card: U.$('#card-amenities') });
     layers.transit = WAMAP.createTransit({ map, card: U.$('#card-transit') });
@@ -424,9 +425,20 @@
     for (const sec of CFG.SOURCES) {
       srcHost.appendChild(U.el('h3', { text: sec.section }));
       srcHost.appendChild(U.el('ul', {}, sec.items.map(t => U.el('li', { text: t }))));
+      if (sec.links) {
+        srcHost.appendChild(U.el('p', { class: 'src-links' }, sec.links.flatMap((l, i) => [
+          i ? ' · ' : null,
+          U.el('a', Object.assign({ href: l.url || '#', target: '_blank', rel: 'noopener', text: l.label }, l.table ? { 'data-table': l.table } : {}))])));
+      }
     }
-    U.$('#about-btn').addEventListener('click', () => { modal.style.display = 'flex'; });
-    U.$('#about-link').addEventListener('click', e => { e.preventDefault(); modal.style.display = 'flex'; });
+    // Table links point at the ACS vintage the map's data files carry.
+    function resolveTableLinks() {
+      U.censusStore.load('county').then(acs => {
+        for (const a of srcHost.querySelectorAll('a[data-table]')) a.href = CFG.INSURANCE.tableUrl(a.dataset.table, acs.vintage);
+      }).catch(() => {});
+    }
+    U.$('#about-btn').addEventListener('click', () => { resolveTableLinks(); modal.style.display = 'flex'; });
+    U.$('#about-link').addEventListener('click', e => { e.preventDefault(); resolveTableLinks(); modal.style.display = 'flex'; });
     U.$('#about-close').addEventListener('click', () => { modal.style.display = 'none'; });
     modal.addEventListener('click', e => { if (e.target === modal) modal.style.display = 'none'; });
     document.addEventListener('keydown', e => { if (e.key === 'Escape') modal.style.display = 'none'; });
