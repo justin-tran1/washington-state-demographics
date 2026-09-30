@@ -503,7 +503,7 @@
       {
         id: 'auburn', label: 'Auburn', type: 'prebuilt', file: 'data/crime/auburn.json',
         link: 'https://data.auburnwa.gov/Public-Safety/Crimes/8g4u-7zzy',
-        note: 'Auburn PD case reports with non-criminal case types removed. Addresses geocoded by the Census Bureau; refreshed weekly.'
+        note: 'Auburn PD case reports with non-criminal case types removed. Auburn publishes exact addresses, so each report is generalized to its block before it is geocoded (Census Bureau) and published, and sex offenses, child abuse, protection-order violations, stalking and kidnapping are withheld. Refreshed weekly.'
       },
       {
         id: 'everett', label: 'Everett', type: 'socrata',
@@ -562,7 +562,7 @@
     { section: 'Crime', items: [
       'Statewide: every Washington law-enforcement agency\'s annual NIBRS offense counts from WASPC "Crime in Washington", published by the Office of Financial Management on data.wa.gov. Each agency is drawn where it serves (city police at the city, sheriffs at the county) and colored by offenses per 1,000 residents. In these totals, theft includes motor-vehicle theft and fraud, and DUI and trespass (arrest-only offenses) are not counted.',
       'Incident reports, queried live: Seattle PD (SPD Crime Data, NIBRS; SPD redacts the location of most homicides and sex offenses), Tacoma PD reported crime (excludes domestic-violence and sex offenses), Bellevue PD offenses, Redmond PD crime map, Kirkland PD crime map, Everett PD police cases (excludes domestic-violence, child-abuse and minor sex cases), Yakima PD offenses, and the Pierce County Sheriff\'s rolling 12-month crime data.',
-      'Incident reports, geocoded weekly by the build: King County Sheriff\'s Office offense reports (unincorporated King County and contract cities) and Auburn PD case reports, which publish block addresses only; the Census Bureau batch geocoder places them.',
+      'Incident reports, geocoded weekly by the build: King County Sheriff\'s Office offense reports (unincorporated King County and contract cities) and Auburn PD case reports. KCSO publishes block addresses; Auburn publishes exact ones, which the build generalizes to the block, withholding sex offenses, child abuse, protection-order violations, stalking and kidnapping altogether. The Census Bureau batch geocoder places the blocks.',
       'Counts reflect reported offenses, not convictions, and reporting practices differ between agencies - compare places within one source, not across sources. Several large departments (among them Spokane, Vancouver, Bellingham, Olympia, Renton, Federal Way, Bremerton and the Snohomish and Clark County sheriffs) publish no open incident feed; they appear in the statewide totals only.'
     ]},
     { section: 'Drive-time areas', items: [

@@ -244,6 +244,25 @@ async function buildKCSO(outDir) {
   }, located);
 }
 
+/**
+ * "1210 AUBURN WAY N # D" -> { street: "1200 AUBURN WAY N", label: "1200 block of AUBURN WAY N" }.
+ * Auburn publishes exact house and apartment addresses; nothing finer than
+ * the block is geocoded or published. Intersections are kept as they are.
+ */
+function toBlock(addr) {
+  const a = String(addr || '').split(/[;,]/)[0]
+    .replace(/\s+(#|apt|apartment|unit|ste|suite|spc|space|lot|trlr|bldg|rm|room)(?![a-z]).*$/i, '')
+    .replace(/\s+/g, ' ').trim();
+  const m = a.match(/^(\d+)[A-Z]?(?:-[A-Z0-9]+)?\s+(.+)$/i);
+  if (!m) return /&|\//.test(a) ? { street: a, label: a } : null;
+  const block = Math.floor(+m[1] / 100) * 100;
+  return { street: `${block || 1} ${m[2]}`, label: `${block} block of ${m[2]}` };
+}
+
+// Victims of these offenses can be identified from a location, so they are
+// not published at all (Seattle, Tacoma and Everett withhold them too).
+const AUBURN_WITHHELD = /^(sex|rape|child abuse|order violation|stalking|custodial inter|kidnap|human traffick)/i;
+
 // Auburn's feed mixes crimes with every other case type the department logs.
 const AUBURN_NON_CRIME = /^(verbal domestic|traffic|warrant arrest|missing person|impounded vehic|person in distr|alarm|canceled|dead body|lost\/found prop|recovered stole|assist|cps|aps|civil matter|welfare check|suspicious|animal problem|juvenile proble|miscellaneous|abandoned veh|mental|information|found property|runaway|natural death)/i;
 async function buildAuburn(outDir) {
@@ -251,15 +270,23 @@ async function buildAuburn(outDir) {
   const rows = await socrataAll('https://data.auburnwa.gov', '8g4u-7zzy', {
     $select: 'casenumber,offense,reported,address', $where: `reported >= '${since}'`, $order: 'reported'
   });
-  const list = rows.filter(r => r.offense && r.reported && !AUBURN_NON_CRIME.test(r.offense.trim()))
+  const crimes = rows.filter(r => r.offense && r.reported && !AUBURN_NON_CRIME.test(r.offense.trim()));
+  const withheld = crimes.filter(r => AUBURN_WITHHELD.test(r.offense.trim())).length;
+  const list = crimes.filter(r => !AUBURN_WITHHELD.test(r.offense.trim())).map(r => {
+    const b = toBlock(r.address);
     // The feed mixes "Theft" and "THEFT"; unify, but keep acronyms such as DUI.
-    .map(r => ({ t: parsePacific(r.reported), offense: r.offense.trim().replace(/^[A-Z ]{5,}$/, s => s[0] + s.slice(1).toLowerCase()), addr: r.address, city: 'Auburn' }));
+    return { t: parsePacific(r.reported), offense: r.offense.trim().replace(/^[A-Z ]{5,}$/, s => s[0] + s.slice(1).toLowerCase()),
+      addr: b ? b.street : '', label: b ? b.label : '', city: 'Auburn' };
+  });
+  log(`Auburn: ${list.length} reports, ${withheld} withheld (sensitive offense types)`);
   if (list.length < 2000) throw new Error(`only ${list.length} Auburn crime reports in the last year`);
-  const located = await geocodeIncidents(list, 'Auburn', [47.2, -122.4, 47.4, -122.05]);
+  // geocodeIncidents reads `addr` (already the block's first address); the
+  // published address is the block label.
+  const located = (await geocodeIncidents(list, 'Auburn', [47.2, -122.4, 47.4, -122.05])).map(i => ({ ...i, addr: i.label }));
   if (located.length < list.length * 0.5) throw new Error(`only ${located.length}/${list.length} Auburn reports geocoded`);
   return writeIncidents(outDir, 'auburn', {
-    label: 'Auburn', source: 'City of Auburn police case reports (non-criminal case types removed), addresses geocoded by the U.S. Census Bureau',
-    url: 'https://data.auburnwa.gov/Public-Safety/Crimes/8g4u-7zzy', fetched: list.length
+    label: 'Auburn', source: 'City of Auburn police case reports (non-criminal case types removed; sex offenses, child abuse, protection-order violations, stalking and kidnapping withheld), generalized to the block and geocoded by the U.S. Census Bureau',
+    url: 'https://data.auburnwa.gov/Public-Safety/Crimes/8g4u-7zzy', fetched: list.length, withheld
   }, located);
 }
 

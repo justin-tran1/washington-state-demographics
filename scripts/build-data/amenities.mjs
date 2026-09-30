@@ -873,11 +873,12 @@ const CATEGORIES = {
     radius: 150,
     classOf: r => isHospitalKind(r.kind) ? 'hospital' : /surgery/i.test(r.kind) ? 'asc'
       : /doctor/i.test(r.kind) ? 'doctor' : /vet center/i.test(r.kind) ? 'vetctr' : 'clinic',
-    // Within 75 m two hospitals from different sources are one (a renamed
-    // hospital: "Highline Medical Center" is St. Anne Hospital); up to 350 m
-    // they are one campus only if the names share a word (see merge()).
+    // Within 30 m two hospitals from different sources are one (a renamed
+    // hospital: "Highline Medical Center" is St. Anne Hospital, 8 m away); up
+    // to 350 m they are one campus only if the names share a word (see
+    // merge()): Wellfound Behavioral Health, 65 m from Allenmore, is not.
     classRadius: { hospital: 350, clinic: 40, asc: 40, doctor: 25, vetctr: 40 },
-    spotRadius: { hospital: 75 },
+    spotRadius: { hospital: 30 },
     // A hospital campus's OSM centre can sit well away from the licensed
     // address point; the same name within 1.5 km is the same hospital.
     nameRadius: { hospital: 1500 },
