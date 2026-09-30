@@ -1,17 +1,16 @@
-// TEMPORARY probe (removed before merge): inspects the sources the zoning
-// layer and the medical site evaluation would use, from GitHub Actions
-// (the development sandbox cannot reach them). Prints fields, sample
-// records, sizes and the CORS header each answer carries for a browser.
+// TEMPORARY probe (removed before merge), round 2: jurisdictions the zoning
+// atlas has no zones for and their own zoning services, WAZA category counts,
+// FEMA flood zones, a leaner Overpass query and a 10/15/20-minute isochrone.
 const ORIGIN = 'https://justin-tran1.github.io';
 const UA = 'washington-state-demographics source probe (github.com/justin-tran1/washington-state-demographics)';
-
+const sleep = ms => new Promise(r => setTimeout(r, ms));
 async function get(url, opts = {}) {
   const t0 = Date.now();
   try {
     const res = await fetch(url, {
       method: opts.method || 'GET', body: opts.body,
       headers: Object.assign({ Origin: ORIGIN, 'User-Agent': UA }, opts.headers || {}),
-      signal: AbortSignal.timeout(opts.timeout || 90000)
+      signal: AbortSignal.timeout(opts.timeout || 60000)
     });
     const text = await res.text();
     let json = null;
@@ -25,251 +24,148 @@ const qs = o => Object.entries(o).map(([k, v]) => encodeURIComponent(k) + '=' + 
 const short = (v, n = 160) => { const s = typeof v === 'string' ? v : JSON.stringify(v); return s && s.length > n ? s.slice(0, n) + '…' : s; };
 const H = t => console.log('\n=== ' + t + ' ===');
 const line = (...a) => console.log(a.join(' '));
-const status = (label, r) => line(`[${label}] HTTP ${r.status} ACAO=${r.acao || 'MISSING'} ${r.ms}ms ${r.bytes}B${r.error ? ' ERR ' + r.error : ''}${r.json && r.json.error ? ' APIERR ' + short(r.json.error) : ''}`);
+const WAZA = 'https://services6.arcgis.com/tboeqGwETr5ppr5Q/arcgis/rest/services/WAZA_Prototype_Layers/FeatureServer';
 
-const SITES = [
-  ['seattle-downtown', 47.6097, -122.3331], ['seattle-capitol-hill', 47.6205, -122.3190],
-  ['seattle-first-hill-hospital', 47.6086, -122.3212], ['bellevue-downtown', 47.6150, -122.1950],
-  ['black-diamond-sr169', 47.3087, -122.0035], ['black-diamond-ten-trails', 47.3240, -122.0310],
-  ['covington', 47.3587, -122.1115], ['auburn', 47.3073, -122.2285], ['unincorporated-king', 47.4300, -122.0500],
-  ['kent-valley', 47.4000, -122.2500], ['tacoma', 47.2529, -122.4443], ['spokane', 47.6588, -117.4260],
-  ['vancouver', 45.6387, -122.6615], ['yakima', 46.6021, -120.5059], ['rural-okanogan', 48.5000, -119.8000],
-  ['everett', 47.9790, -122.2021], ['olympia', 47.0379, -122.9007]
-];
-const pointParams = (lat, lon, extra = {}) => Object.assign({
-  geometry: `${lon},${lat}`, geometryType: 'esriGeometryPoint', inSR: 4326, spatialRel: 'esriSpatialRelIntersects',
-  returnGeometry: false, f: 'json'
-}, extra);
-
-function fieldList(L) {
-  return (L.fields || []).map(f => {
-    let s = `${f.name}:${String(f.type).replace('esriFieldType', '')}`;
-    if (f.alias && f.alias !== f.name) s += `("${f.alias}")`;
-    if (f.domain && f.domain.codedValues) s += `[${f.domain.codedValues.slice(0, 25).map(c => c.code + '=' + c.name).join('; ')}${f.domain.codedValues.length > 25 ? '; …' : ''}]`;
-    return s;
-  });
-}
-async function describeLayer(url, label) {
-  const r = await get(url + '?f=json');
-  status(label + ' layer', r);
-  const L = r.json;
-  if (!L || L.error) return null;
-  line(`name=${L.name} type=${L.type} geom=${L.geometryType} maxRecordCount=${L.maxRecordCount} formats=${L.supportedQueryFormats}`);
-  line(`advancedQuery=${short(L.advancedQueryCapabilities, 400)}`);
-  line(`extent=${short(L.extent, 300)}`);
-  line(`editingInfo=${short(L.editingInfo)} lastEdit=${L.editingInfo && L.editingInfo.lastEditDate ? new Date(L.editingInfo.lastEditDate).toISOString() : '-'}`);
-  line('fields: ' + fieldList(L).join(' | '));
-  const rend = L.drawingInfo && L.drawingInfo.renderer;
-  if (rend) {
-    line(`renderer type=${rend.type} field1=${rend.field1} field2=${rend.field2 || ''} field3=${rend.field3 || ''} fieldDelimiter=${rend.fieldDelimiter || ''}`);
-    for (const u of (rend.uniqueValueInfos || []).slice(0, 80)) line(`  uv value=${short(u.value, 80)} label=${short(u.label, 80)} color=${u.symbol && u.symbol.color}`);
-    if ((rend.uniqueValueInfos || []).length > 80) line(`  … ${rend.uniqueValueInfos.length} unique values in all`);
-  }
-  const c = await get(url + '/query?' + qs({ where: '1=1', returnCountOnly: true, f: 'json' }));
-  line(`count=${c.json && c.json.count} (HTTP ${c.status}, ACAO=${c.acao || 'MISSING'})`);
-  return L;
-}
-async function distinctValues(url, L, maxList = 90) {
-  for (const f of (L.fields || [])) {
-    if (!/String|SmallInteger|Integer|Double/.test(f.type) || /^(objectid|fid|shape|globalid)/i.test(f.name)) continue;
-    const r = await get(url + '/query?' + qs({ where: '1=1', outFields: f.name, returnDistinctValues: true, returnGeometry: false,
-      orderByFields: f.name, resultRecordCount: 2000, f: 'json' }));
-    const vals = r.json && r.json.features ? r.json.features.map(x => x.attributes[f.name]) : null;
-    if (!vals) { line(`  distinct ${f.name}: HTTP ${r.status} ${short(r.json && r.json.error)}`); continue; }
-    line(`  distinct ${f.name} (${vals.length}${r.json.exceededTransferLimit ? '+' : ''}): ${vals.slice(0, maxList).map(v => short(v, 70)).join(' ¦ ')}${vals.length > maxList ? ' ¦ …' : ''}`);
-  }
-}
-async function groupCounts(url, field) {
-  const r = await get(url + '/query?' + qs({ where: '1=1', groupByFieldsForStatistics: field,
+// ---------------------------------------------------------------- WAZA stats
+H('WAZA zone statistics');
+async function groupCounts(field, where = '1=1') {
+  const r = await get(WAZA + '/0/query?' + qs({ where, groupByFieldsForStatistics: field,
     outStatistics: [{ statisticType: 'count', onStatisticField: 'OBJECTID', outStatisticFieldName: 'n' }], f: 'json' }));
-  if (!r.json || !r.json.features) { line(`  group ${field}: HTTP ${r.status} ${short(r.json && r.json.error)}`); return; }
-  const rows = r.json.features.map(x => x.attributes).sort((a, b) => b.n - a.n);
-  line(`  group ${field}: ` + rows.slice(0, 60).map(a => `${short(a[field], 60)}=${a.n}`).join(' ¦ '));
+  if (!r.json || !r.json.features) { line(`group ${field}: HTTP ${r.status} ${short(r.json && r.json.error)}`); return []; }
+  return r.json.features.map(x => x.attributes).sort((a, b) => b.n - a.n);
 }
-
-// ---------------------------------------------------------------- WAZA
-H('WAZA item');
-const item = await get('https://www.arcgis.com/sharing/rest/content/items/743c0f2e1c1b4a438452c4d40ff53d74?f=json');
-status('item', item);
-const I = item.json || {};
-line(`title=${I.title} type=${I.type} url=${I.url} owner=${I.owner} created=${I.created && new Date(I.created).toISOString()} modified=${I.modified && new Date(I.modified).toISOString()}`);
-line(`typeKeywords=${short(I.typeKeywords, 300)}`);
-line(`snippet=${short(I.snippet, 400)}`);
-line(`accessInformation=${short(I.accessInformation, 400)}`);
-line(`licenseInfo=${short(String(I.licenseInfo || '').replace(/<[^>]+>/g, ' '), 900)}`);
-line(`description=${short(String(I.description || '').replace(/<[^>]+>/g, ' '), 2500)}`);
-const WAZA = I.url;
-if (WAZA) {
-  H('WAZA service');
-  const svc = await get(WAZA + '?f=json');
-  status('service', svc);
-  const S = svc.json || {};
-  line(`capabilities=${S.capabilities} maxRecordCount=${S.maxRecordCount} formats=${S.supportedQueryFormats} layers=${short((S.layers || []).map(l => l.id + ':' + l.name))} tables=${short((S.tables || []).map(l => l.id + ':' + l.name))}`);
-  line(`serviceDescription=${short(S.serviceDescription, 600)} copyright=${short(S.copyrightText, 300)}`);
-  const layers = {};
-  for (const l of (S.layers || []).concat(S.tables || [])) {
-    H('WAZA layer ' + l.id + ' ' + l.name);
-    const L = await describeLayer(WAZA + '/' + l.id, 'waza' + l.id);
-    if (!L) continue;
-    layers[l.id] = L;
-    await distinctValues(WAZA + '/' + l.id, L);
-  }
-  // Point lookups: every layer, every attribute (WAZA holds no personal data).
-  for (const [name, lat, lon] of SITES) {
-    H('WAZA at ' + name);
-    for (const id of Object.keys(layers)) {
-      if (layers[id].type === 'Table') continue;
-      const r = await get(WAZA + '/' + id + '/query?' + qs(pointParams(lat, lon, { outFields: '*' })));
-      const feats = r.json && r.json.features;
-      line(`layer ${id} (${layers[id].name}): HTTP ${r.status} ACAO=${r.acao || 'MISSING'} ${r.ms}ms n=${feats ? feats.length : '?'} ${feats ? '' : short(r.json && r.json.error)}`);
-      for (const f of (feats || []).slice(0, 6)) line('   ' + short(f.attributes, 1600));
-    }
-  }
-  // Payload sizes for drawing: a ~2 km and a ~8 km view in Seattle.
-  H('WAZA drawing payloads');
-  for (const [label, d, off] of [['2km z15', 0.012, 0.00002], ['5km z14', 0.03, 0.00004], ['10km z13', 0.06, 0.00008], ['20km z12', 0.12, 0.00015]]) {
-    const env = `${-122.33 - d},${47.61 - d * 0.67},${-122.33 + d},${47.61 + d * 0.67}`;
-    const r = await get(WAZA + '/0/query?' + qs({ geometry: env, geometryType: 'esriGeometryEnvelope', inSR: 4326, spatialRel: 'esriSpatialRelIntersects',
-      outFields: 'OBJECTID', returnGeometry: true, outSR: 4326, geometryPrecision: 6, maxAllowableOffset: off, f: 'geojson', resultRecordCount: 2000 }));
-    line(`${label}: HTTP ${r.status} ${r.ms}ms ${r.bytes}B features=${r.json && r.json.features ? r.json.features.length : '?'} exceeded=${r.json && (r.json.exceededTransferLimit || (r.json.properties && r.json.properties.exceededTransferLimit))}`);
-    const p = await get(WAZA + '/0/query?' + qs({ geometry: env, geometryType: 'esriGeometryEnvelope', inSR: 4326, spatialRel: 'esriSpatialRelIntersects',
-      outFields: 'OBJECTID', returnGeometry: true, outSR: 4326, maxAllowableOffset: off, quantizationParameters: { mode: 'view', originPosition: 'upperLeft', tolerance: off, extent: { xmin: -122.33 - d, ymin: 47.61 - d * 0.67, xmax: -122.33 + d, ymax: 47.61 + d * 0.67, spatialReference: { wkid: 4326 } } }, f: 'pbf', resultRecordCount: 2000 }));
-    line(`${label} pbf: HTTP ${p.status} ${p.ms}ms ${p.bytes}B ctype=${p.ctype}`);
-  }
+for (const f of ['WAZAZoneGeneral', 'WAZAZoneSpecific', 'UseOffice', 'UseRetail']) {
+  const rows = await groupCounts(f);
+  line(`by ${f}: ` + rows.map(a => `${a[f]}=${a.n}`).join(' ¦ '));
 }
-
-// ---------------------------------------------------------------- local services for comparison
-H('Seattle zoning (city service)');
-const SEA = 'https://services.arcgis.com/ZOyb2t4B0UYuYNYH/arcgis/rest/services/Current_Land_Use_Zoning_Detail_2/FeatureServer/0';
-const seaL = await describeLayer(SEA, 'seattle');
-for (const [name, lat, lon] of SITES.filter(s => /^seattle/.test(s[0]))) {
-  const r = await get(SEA + '/query?' + qs(pointParams(lat, lon, { outFields: '*' })));
-  line(`${name}: HTTP ${r.status} ACAO=${r.acao || 'MISSING'} ` + short(r.json && r.json.features && r.json.features.map(f => f.attributes), 1500));
-}
-H('King County planning services');
-const kc = await get('https://gisdata.kingcounty.gov/arcgis/rest/services/OpenDataPortal/planning___base/MapServer?f=json');
-status('kc planning', kc);
-line(short((kc.json && kc.json.layers || []).map(l => l.id + ':' + l.name), 3000));
-
-H('ArcGIS Online zoning services in Washington (discovery)');
-for (const start of [1, 101, 201]) {
-  const r = await get('https://www.arcgis.com/sharing/rest/search?' + qs({ q: 'zoning type:"Feature Service" access:public', bbox: '-124.85,45.53,-116.9,49.01',
-    num: 100, start, sortField: 'numviews', sortOrder: 'desc', f: 'json' }));
-  if (!r.json || !r.json.results) { status('search', r); break; }
-  for (const x of r.json.results) {
-    const ext = x.extent && x.extent.length === 2 ? x.extent.flat().map(v => v.toFixed(2)).join(',') : '';
-    line(`  ${x.title} | owner=${x.owner} | views=${x.numViews} | mod=${new Date(x.modified).toISOString().slice(0, 10)} | ext=${ext} | ${x.url}`);
-  }
-  if (!r.json.nextStart || r.json.nextStart < 0) break;
-}
-
-// ---------------------------------------------------------------- parcels
-H('Statewide parcels');
-const PAR = 'https://services.arcgis.com/jsIt88o09Q0r1j8h/arcgis/rest/services/Current_Parcels/FeatureServer';
-const parSvc = await get(PAR + '?f=json');
-status('parcels service', parSvc);
-line(short(parSvc.json && { layers: parSvc.json.layers, tables: parSvc.json.tables, desc: parSvc.json.serviceDescription }, 1500));
-const parL = await describeLayer(PAR + '/0', 'parcels0');
-for (const id of [1, 2]) {
-  const r = await get(PAR + '/' + id + '/query?' + qs({ where: '1=1', outFields: '*', returnGeometry: false, resultRecordCount: 50, f: 'json' }));
-  line(`parcels layer ${id}: HTTP ${r.status} n=${r.json && r.json.features ? r.json.features.length : '?'} ` + short(r.json && r.json.features && r.json.features.map(f => f.attributes), 2500));
-}
-if (parL) {
-  // Never owner or taxpayer fields: only parcel identity, size, use, value and links.
-  const safe = (parL.fields || []).map(f => f.name).filter(n => !/owner|taxpayer|name|mail|contact|phone|email/i.test(n) || /land_?use|use_?name|county_?name/i.test(n));
-  line('safe outFields: ' + safe.join(','));
-  for (const [name, lat, lon] of SITES) {
-    const r = await get(PAR + '/0/query?' + qs(pointParams(lat, lon, { outFields: safe.join(','), returnGeometry: true, outSR: 4326, geometryPrecision: 6, f: 'geojson' })));
-    const f = r.json && r.json.features && r.json.features[0];
-    let acres = null;
-    if (f && f.geometry) {
-      const rings = f.geometry.type === 'Polygon' ? [f.geometry.coordinates[0]] : f.geometry.type === 'MultiPolygon' ? f.geometry.coordinates.map(p => p[0]) : [];
-      let m2 = 0;
-      for (const ring of rings) {
-        let s = 0;
-        for (let i = 0; i < ring.length - 1; i++) {
-          const [x1, y1] = ring[i], [x2, y2] = ring[i + 1];
-          s += (x2 - x1) * Math.PI / 180 * (2 + Math.sin(y1 * Math.PI / 180) + Math.sin(y2 * Math.PI / 180));
-        }
-        m2 += Math.abs(s * 6371008.8 * 6371008.8 / 2);
-      }
-      acres = (m2 / 4046.86).toFixed(3);
-    }
-    line(`${name}: HTTP ${r.status} ACAO=${r.acao || 'MISSING'} ${r.ms}ms acres=${acres} ` + short(f && f.properties, 1200));
-  }
-}
-
-// ---------------------------------------------------------------- WSDOT traffic
-H('WSDOT traffic data');
-const TD = 'https://data.wsdot.wa.gov/arcgis/rest/services/Shared/TrafficData/FeatureServer';
-const tdSvc = await get(TD + '?f=json');
-status('traffic service', tdSvc);
-line(short(tdSvc.json && tdSvc.json.layers, 800));
-for (const id of [0, 1]) await describeLayer(TD + '/' + id, 'traffic' + id);
-for (const [name, lat, lon] of SITES.slice(0, 12)) {
-  for (const id of [0, 1]) {
-    const r = await get(TD + '/' + id + '/query?' + qs(pointParams(lat, lon, { distance: 300, units: 'esriSRUnit_Meter', outFields: '*' })));
-    line(`${name} layer${id}: HTTP ${r.status} ACAO=${r.acao || 'MISSING'} n=${r.json && r.json.features ? r.json.features.length : '?'} ` + short(r.json && r.json.features && r.json.features.slice(0, 3).map(f => f.attributes), 900));
-  }
-}
-
-// ---------------------------------------------------------------- elevation
-H('Elevation');
-for (const [name, lat, lon] of SITES.slice(0, 6)) {
-  const r = await get(`https://epqs.nationalmap.gov/v1/json?x=${lon}&y=${lat}&wkid=4326&units=Feet&includeDate=false`);
-  line(`EPQS ${name}: HTTP ${r.status} ACAO=${r.acao || 'MISSING'} ${r.ms}ms ${short(r.text, 300)}`);
+for (const g of ['COM', 'MXU', 'IND', 'PUB', 'MR', 'LIR', 'RUR', 'NRL', 'OS', 'UND', 'UNK']) {
+  const rows = await groupCounts('UseOffice', `WAZAZoneGeneral='${g}'`);
+  line(`UseOffice within ${g}: ` + rows.map(a => `${a.UseOffice}=${a.n}`).join(' ¦ '));
 }
 {
-  const lats = SITES.slice(0, 6).map(s => s[1]).join(','), lons = SITES.slice(0, 6).map(s => s[2]).join(',');
-  const r = await get(`https://api.open-meteo.com/v1/elevation?latitude=${lats}&longitude=${lons}`);
-  line(`open-meteo: HTTP ${r.status} ACAO=${r.acao || 'MISSING'} ${r.ms}ms ${short(r.text, 300)}`);
+  const nullGen = await groupCounts('Jurisdiction', 'WAZAZoneGeneral IS NULL');
+  line('zones without a general class, by jurisdiction: ' + nullGen.slice(0, 40).map(a => `${a.Jurisdiction}=${a.n}`).join(' ¦ '));
+  const combos = await get(WAZA + '/0/query?' + qs({ where: '1=1', outFields: 'GEOID,ZoneID', returnDistinctValues: true, returnCountOnly: true, f: 'json' }));
+  line('distinct (GEOID, ZoneID): ' + short(combos.json, 200));
+  const combos2 = await get(WAZA + '/0/query?' + qs({ where: '1=1', outFields: 'GEOID,ZoneID,ZoneName,WAZAZoneGeneral,WAZAZoneSpecific,UseOffice,UseRetail', returnDistinctValues: true, returnCountOnly: true, f: 'json' }));
+  line('distinct (GEOID, ZoneID, name, classes, office, retail): ' + short(combos2.json, 200));
+}
+
+// ---------------------------------------------------------------- missing jurisdictions
+H('Jurisdictions without zones');
+const zonesByGeoid = new Map((await groupCounts('GEOID')).map(a => [a.GEOID, a.n]));
+line(`jurisdictions with zones: ${zonesByGeoid.size}`);
+const jr = await get(WAZA + '/2/query?' + qs({ where: '1=1', outFields: 'GEOID,Jurisdiction,COUNTYNAME,SpatialSource,ZoningGISURL,ZoneIDField,CodeURL,ZoningFileURL,WAZACODEADOPTIONDATE',
+  returnGeometry: true, outSR: 4326, maxAllowableOffset: 0.002, geometryPrecision: 4, f: 'geojson', resultRecordCount: 400 }));
+const juris = (jr.json && jr.json.features) || [];
+line(`jurisdictions: ${juris.length} (HTTP ${jr.status}, ${jr.bytes}B)`);
+function interiorPoint(geom) {
+  // Centre of the largest ring's bounding box, nudged to a vertex average if outside.
+  const polys = geom.type === 'Polygon' ? [geom.coordinates] : geom.coordinates;
+  let best = null, bestA = -1;
+  for (const p of polys) {
+    const ring = p[0];
+    let a = 0;
+    for (let i = 0; i < ring.length - 1; i++) a += ring[i][0] * ring[i + 1][1] - ring[i + 1][0] * ring[i][1];
+    if (Math.abs(a) > bestA) { bestA = Math.abs(a); best = ring; }
+  }
+  const inside = (x, y) => { let c = false; for (let i = 0, j = best.length - 1; i < best.length; j = i++) { const [xi, yi] = best[i], [xj, yj] = best[j]; if ((yi > y) !== (yj > y) && x < (xj - xi) * (y - yi) / (yj - yi) + xi) c = !c; } return c; };
+  let xs = best.map(p => p[0]), ys = best.map(p => p[1]);
+  const cx = (Math.min(...xs) + Math.max(...xs)) / 2, cy = (Math.min(...ys) + Math.max(...ys)) / 2;
+  if (inside(cx, cy)) return [cx, cy];
+  // scan a grid for an inside point
+  const x0 = Math.min(...xs), x1 = Math.max(...xs), y0 = Math.min(...ys), y1 = Math.max(...ys);
+  for (let k = 1; k < 12; k++) for (let i = 1; i < k; i++) for (let j = 1; j < k; j++) {
+    const x = x0 + (x1 - x0) * i / k, y = y0 + (y1 - y0) * j / k;
+    if (inside(x, y)) return [x, y];
+  }
+  return [cx, cy];
+}
+const missing = juris.filter(f => !zonesByGeoid.has(f.properties.GEOID));
+line(`without zones: ${missing.length}`);
+for (const f of missing) {
+  const p = f.properties;
+  const [x, y] = f.geometry ? interiorPoint(f.geometry) : [null, null];
+  line(`\n-- ${p.Jurisdiction} (${p.GEOID}, ${p.COUNTYNAME}) source=${p.SpatialSource} zoneField=${p.ZoneIDField} adopted=${p.WAZACODEADOPTIONDATE ? new Date(p.WAZACODEADOPTIONDATE).toISOString().slice(0, 10) : '-'} pt=${x && x.toFixed(4)},${y && y.toFixed(4)}`);
+  line(`   gis=${p.ZoningGISURL || '-'}  file=${p.ZoningFileURL || '-'}  code=${p.CodeURL || '-'}`);
+  const url = String(p.ZoningGISURL || '').trim().replace(/\/+$/, '');
+  if (!/\/(MapServer|FeatureServer)\/\d+$/i.test(url)) continue;
+  const L = await get(url + '?f=json', { timeout: 30000 });
+  const li = L.json || {};
+  line(`   layer: HTTP ${L.status} ACAO=${L.acao || 'MISSING'} ${L.ms}ms name=${li.name} geom=${li.geometryType} maxRec=${li.maxRecordCount} formats=${li.supportedQueryFormats} ${li.error ? 'ERR ' + short(li.error) : ''}`);
+  if (!li.fields) continue;
+  line('   fields: ' + li.fields.map(f2 => f2.name + ':' + String(f2.type).replace('esriFieldType', '') + (f2.alias && f2.alias !== f2.name ? '("' + f2.alias + '")' : '') + (f2.domain && f2.domain.codedValues ? '[' + f2.domain.codedValues.slice(0, 30).map(c => c.code + '=' + c.name).join('; ') + ']' : '')).join(' | ').slice(0, 2500));
+  const zf = p.ZoneIDField && li.fields.find(f2 => f2.name.toLowerCase() === String(p.ZoneIDField).toLowerCase()) ? li.fields.find(f2 => f2.name.toLowerCase() === String(p.ZoneIDField).toLowerCase()).name : null;
+  const cnt = await get(url + '/query?' + qs({ where: '1=1', returnCountOnly: true, f: 'json' }), { timeout: 30000 });
+  line(`   count=${cnt.json && cnt.json.count} ACAO=${cnt.acao || 'MISSING'}`);
+  if (zf) {
+    const d = await get(url + '/query?' + qs({ where: '1=1', outFields: zf, returnDistinctValues: true, returnGeometry: false, orderByFields: zf, f: 'json' }), { timeout: 30000 });
+    const vals = d.json && d.json.features ? d.json.features.map(x2 => x2.attributes[zf]) : null;
+    line(`   distinct ${zf} (${vals ? vals.length : '?'}): ${vals ? vals.map(v => short(v, 50)).join(' ¦ ').slice(0, 1500) : short(d.json && d.json.error)}`);
+  }
+  const sample = await get(url + '/query?' + qs({ where: '1=1', outFields: '*', returnGeometry: false, resultRecordCount: 3, f: 'json' }), { timeout: 30000 });
+  line('   sample: ' + short(sample.json && sample.json.features && sample.json.features.map(x2 => x2.attributes), 1500));
+  if (x != null) {
+    const pt = await get(url + '/query?' + qs({ geometry: `${x},${y}`, geometryType: 'esriGeometryPoint', inSR: 4326, spatialRel: 'esriSpatialRelIntersects',
+      outFields: zf || '*', returnGeometry: false, f: 'json' }), { timeout: 30000 });
+    line(`   at interior point: HTTP ${pt.status} ACAO=${pt.acao || 'MISSING'} ${short(pt.json && (pt.json.features ? pt.json.features.map(x2 => x2.attributes) : pt.json.error), 400)}`);
+    const gj = await get(url + '/query?' + qs({ geometry: `${x - 0.01},${y - 0.007},${x + 0.01},${y + 0.007}`, geometryType: 'esriGeometryEnvelope', inSR: 4326, spatialRel: 'esriSpatialRelIntersects',
+      outFields: zf || '*', returnGeometry: true, outSR: 4326, geometryPrecision: 5, f: 'geojson' }), { timeout: 30000 });
+    line(`   geojson envelope: HTTP ${gj.status} ACAO=${gj.acao || 'MISSING'} ${gj.bytes}B features=${gj.json && gj.json.features ? gj.json.features.length : '?'} ${gj.json && gj.json.error ? short(gj.json.error) : ''}`);
+  }
 }
 
 // ---------------------------------------------------------------- FEMA
-H('FEMA NFHL');
-const NFHL = 'https://hazards.fema.gov/arcgis/rest/services/public/NFHL/MapServer';
-const nf = await get(NFHL + '?f=json');
-status('nfhl service', nf);
-line(short(nf.json && (nf.json.layers || []).map(l => l.id + ':' + l.name), 1500));
-for (const [name, lat, lon] of SITES.slice(0, 12)) {
-  const r = await get(NFHL + '/28/query?' + qs(pointParams(lat, lon, { outFields: 'FLD_ZONE,ZONE_SUBTY,SFHA_TF,STATIC_BFE,DFIRM_ID,EFF_DATE' })));
-  line(`${name}: HTTP ${r.status} ACAO=${r.acao || 'MISSING'} ${r.ms}ms ${short(r.json && (r.json.features ? r.json.features.map(f => f.attributes) : r.json.error), 500)}`);
+H('FEMA NFHL (fixed fields)');
+const NFHL = 'https://hazards.fema.gov/arcgis/rest/services/public/NFHL/MapServer/28';
+const nfl = await get(NFHL + '?f=json');
+line(`layer: HTTP ${nfl.status} ACAO=${nfl.acao || 'MISSING'} fields=${short(nfl.json && nfl.json.fields && nfl.json.fields.map(f => f.name), 800)}`);
+const FSITES = [['kent-valley', 47.4, -122.25], ['auburn-green-river', 47.29, -122.22], ['black-diamond', 47.3087, -122.0035], ['seattle-downtown', 47.6097, -122.3331], ['snoqualmie', 47.53, -121.83], ['yakima', 46.6021, -120.5059]];
+for (const [name, lat, lon] of FSITES) {
+  for (const extra of [{ outFields: 'FLD_ZONE,ZONE_SUBTY,SFHA_TF,STATIC_BFE' }, { outFields: '*' }]) {
+    const r = await get(NFHL + '/query?' + qs(Object.assign({ geometry: `${lon},${lat}`, geometryType: 'esriGeometryPoint', inSR: 4326, spatialRel: 'esriSpatialRelIntersects', returnGeometry: false, f: 'json' }, extra)));
+    line(`${name} ${extra.outFields.slice(0, 12)}: HTTP ${r.status} ACAO=${r.acao || 'MISSING'} ${r.ms}ms ${short(r.json && (r.json.features ? r.json.features.map(f => f.attributes) : r.json.error), 400)}`);
+  }
+}
+const LA = 'https://services.arcgis.com/P3ePLMYs2RVChkJx/arcgis/rest/services/USA_Flood_Hazard_Reduced_Set_gdb/FeatureServer';
+const las = await get(LA + '?f=json');
+line(`living atlas flood: HTTP ${las.status} ACAO=${las.acao || 'MISSING'} layers=${short(las.json && las.json.layers && las.json.layers.map(l => l.id + ':' + l.name), 300)}`);
+const lal = await get(LA + '/0?f=json');
+line(`   layer0 fields=${short(lal.json && lal.json.fields && lal.json.fields.map(f => f.name), 600)}`);
+for (const [name, lat, lon] of FSITES) {
+  const r = await get(LA + '/0/query?' + qs({ geometry: `${lon},${lat}`, geometryType: 'esriGeometryPoint', inSR: 4326, spatialRel: 'esriSpatialRelIntersects', outFields: '*', returnGeometry: false, f: 'json' }));
+  line(`   ${name}: HTTP ${r.status} ACAO=${r.acao || 'MISSING'} ${r.ms}ms ${short(r.json && (r.json.features ? r.json.features.map(f => f.attributes) : r.json.error), 400)}`);
 }
 
-// ---------------------------------------------------------------- Overpass
-H('Overpass');
-async function overpass(ql, label) {
-  const r = await get('https://overpass-api.de/api/interpreter', { method: 'POST', body: 'data=' + encodeURIComponent(ql),
-    headers: { 'Content-Type': 'application/x-www-form-urlencoded' } });
-  const els = r.json && r.json.elements;
-  const kinds = {};
-  for (const e of (els || [])) {
-    const t = e.tags || {};
-    const k = t.amenity === 'parking' ? 'parking' : t.social_facility ? 'shelter' : t.highway === 'motorway_junction' ? 'junction' : t.highway ? 'road:' + t.highway : 'other';
-    kinds[k] = (kinds[k] || 0) + 1;
-  }
-  line(`${label}: HTTP ${r.status} ACAO=${r.acao || 'MISSING'} ${r.ms}ms ${r.bytes}B elements=${els ? els.length : '?'} ${JSON.stringify(kinds)} ${els ? '' : short(r.text, 300)}`);
-  return els || [];
+// ---------------------------------------------------------------- Overpass (lean)
+H('Overpass lean site query');
+const OSITES = [['seattle-downtown', 47.6097, -122.3331], ['black-diamond', 47.3087, -122.0035], ['covington', 47.3587, -122.1115]];
+function box(lat, lon, m) {
+  const dLat = m / 111320, dLon = m / (111320 * Math.cos(lat * Math.PI / 180));
+  return [lat - dLat, lon - dLon, lat + dLat, lon + dLon].map(v => v.toFixed(5)).join(',');
 }
-for (const [name, lat, lon] of [SITES[4], SITES[0], SITES[8]]) {
-  const els = await overpass(`[out:json][timeout:40];
-(way["amenity"="parking"](around:250,${lat},${lon});relation["amenity"="parking"](around:250,${lat},${lon}););out tags geom;
-nwr["social_facility"="shelter"](around:3000,${lat},${lon});out tags center;
-way["highway"~"^(motorway|trunk|primary|secondary|tertiary)(_link)?$"](around:800,${lat},${lon});out tags geom;
-node["highway"="motorway_junction"](around:8000,${lat},${lon});out tags;`, name);
-  for (const e of els.filter(e => e.tags && e.tags.amenity === 'parking').slice(0, 8)) line('   parking ' + short(e.tags, 300) + ' pts=' + (e.geometry ? e.geometry.length : e.members ? 'rel' : '?'));
-  for (const e of els.filter(e => e.tags && e.tags.social_facility).slice(0, 8)) line('   shelter ' + short(e.tags, 400));
-  for (const e of els.filter(e => e.tags && e.tags.highway && e.tags.highway !== 'motorway_junction').slice(0, 10)) line('   road ' + short({ highway: e.tags.highway, name: e.tags.name, ref: e.tags.ref, lanes: e.tags.lanes, maxspeed: e.tags.maxspeed }, 200));
+for (const [name, lat, lon] of OSITES) {
+  const ql = `[out:json][timeout:25];
+way["amenity"="parking"](around:200,${lat},${lon});out tags geom;
+nwr["social_facility"="shelter"](around:3219,${lat},${lon});out tags center;
+way["highway"~"^(motorway|trunk|primary|secondary)(_link)?$"](around:500,${lat},${lon});out tags geom(${box(lat, lon, 520)});
+way["highway"="tertiary"](around:160,${lat},${lon});out tags geom(${box(lat, lon, 180)});
+node["highway"="motorway_junction"](around:8047,${lat},${lon});out tags;
+way["building"](around:40,${lat},${lon});out tags geom;`;
+  const r = await get('https://overpass-api.de/api/interpreter', { method: 'POST', body: 'data=' + encodeURIComponent(ql), headers: { 'Content-Type': 'application/x-www-form-urlencoded' } });
+  const els = (r.json && r.json.elements) || [];
+  const k = {};
+  for (const e of els) { const t = e.tags || {}; const key = t.amenity === 'parking' ? 'parking' : t.social_facility ? 'shelter:' + (t['social_facility:for'] || '-') : t.highway === 'motorway_junction' ? 'junction' : t.highway ? t.highway : t.building ? 'building' : 'other'; k[key] = (k[key] || 0) + 1; }
+  line(`${name}: HTTP ${r.status} ACAO=${r.acao || 'MISSING'} ${r.ms}ms ${r.bytes}B elements=${els.length} ${JSON.stringify(k)} ${r.json ? '' : short(r.text, 200)}`);
+  for (const e of els.filter(e2 => e2.tags && e2.tags.building).slice(0, 5)) line('   building ' + short(e.tags, 200) + ' pts=' + (e.geometry ? e.geometry.length : '?'));
+  await sleep(5000);
 }
-{
-  const els = await overpass(`[out:json][timeout:60];nwr["social_facility"="shelter"](45.53,-124.85,49.01,-116.9);out tags center;`, 'shelters statewide');
-  const byFor = {};
-  for (const e of els) { const k = (e.tags || {})['social_facility:for'] || '(none)'; byFor[k] = (byFor[k] || 0) + 1; }
-  line('   social_facility:for ' + JSON.stringify(byFor));
-  const parkingCap = await overpass(`[out:json][timeout:60];way["amenity"="parking"](47.25,-122.45,47.75,-121.95);out tags;`, 'parking tags (Seattle-Bellevue-Kent box)');
-  const withCap = parkingCap.filter(e => e.tags && e.tags.capacity).length;
-  const byType = {};
-  for (const e of parkingCap) { const k = (e.tags || {}).parking || '(none)'; byType[k] = (byType[k] || 0) + 1; }
-  line(`   parking with capacity tag: ${withCap}/${parkingCap.length} parking=${JSON.stringify(byType)}`);
+
+// ---------------------------------------------------------------- Valhalla
+H('Valhalla 10/15/20 minutes');
+for (const [name, lat, lon] of OSITES.slice(1)) {
+  const r = await get('https://valhalla1.openstreetmap.de/isochrone', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ locations: [{ lat, lon }], costing: 'auto', contours: [{ time: 10 }, { time: 15 }, { time: 20 }], polygons: true, denoise: 0.35, generalize: 60 }) });
+  line(`${name}: HTTP ${r.status} ACAO=${r.acao || 'MISSING'} ${r.ms}ms ${r.bytes}B contours=${short(r.json && r.json.features && r.json.features.map(f => f.properties.contour), 100)} ${r.json && r.json.error ? short(r.json) : ''}`);
 }
 line('\nprobe done');
