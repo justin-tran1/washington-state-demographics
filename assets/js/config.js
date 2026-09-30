@@ -326,8 +326,9 @@
     { id: 'retail', label: 'Retail & shopping', emoji: '🛍️', colorToken: 'retail' },
     { id: 'pharmacy', label: 'Pharmacies', emoji: '💊', colorToken: 'pharmacy' },
     { id: 'health', label: 'Hospitals & clinics', emoji: '🏥', colorToken: 'health',
-      featured: /hospital|emergency/i, featuredLabel: 'hospitals',
-      kindEmoji: [[/hospital|emergency/i, '🏥'], [/./, '🩺']] },
+      // Not "Community health center (on a hospital campus)": that is a clinic.
+      featured: /^(?!community health center).*(hospital|emergency)/i, featuredLabel: 'hospitals',
+      kindEmoji: [[/^(?!community health center).*(hospital|emergency)/i, '🏥'], [/./, '🩺']] },
     { id: 'banks', label: 'Banks & credit unions', emoji: '🏦', colorToken: 'banks' },
     { id: 'fuel', label: 'Fuel & EV charging', emoji: '⛽', colorToken: 'fuel',
       kindEmoji: [[/EV|charging/i, '🔌']] },

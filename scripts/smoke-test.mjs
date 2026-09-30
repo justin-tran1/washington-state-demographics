@@ -351,7 +351,10 @@ assert(/places statewide/.test(status), 'amenities loaded statewide: "' + status
 const schoolCount = (await page.locator('#amen-count-schools').textContent()).replace(/\D/g, '');
 assert(+schoolCount === readData('amenities/schools.json').rows.length, `every school in the file is on the map (${schoolCount})`);
 const health = readData('amenities/health.json');
-const hospitalKinds = new Set(health.kinds.map((k, i) => (/hospital|emergency/i.test(k) ? i : -1)).filter(i => i >= 0));
+// Same rule as CONFIG.AMENITIES' health `featured` (a clinic on a hospital campus is not one).
+const featuredRe = await page.evaluate(() => { const re = WAMAP.CONFIG.AMENITIES.find(c => c.id === 'health').featured; return [re.source, re.flags]; });
+const hospitalKinds = new Set(health.kinds.map((k, i) => (new RegExp(...featuredRe).test(k) ? i : -1)).filter(i => i >= 0));
+assert(!health.kinds.some((k, i) => hospitalKinds.has(i) && /^community health center/i.test(k)), 'health centers on hospital campuses are not drawn as hospitals');
 const hospitals = health.rows.filter(r => hospitalKinds.has(r[3])).length;
 assert(hospitals >= 100, `health file carries at least 100 hospitals (${hospitals})`);
 const bigChips = await page.locator('.poi-chip-lg').count();

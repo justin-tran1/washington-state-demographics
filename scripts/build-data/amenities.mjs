@@ -256,7 +256,9 @@ async function hrsaHealthCenters() {
     if (a.HCC_STATUS_DESC && !/active/i.test(a.HCC_STATUS_DESC)) continue;
     if (/mobile/i.test(`${a.HCC_LOC_DESC || ''} ${a.HCC_LOC_SETTING_DESC || ''}`)) continue; // vans have no fixed site
     const p = pt(f); if (!p) continue;
-    const setting = a.HCC_LOC_SETTING_DESC && !/all other|clinic/i.test(a.HCC_LOC_SETTING_DESC) ? ` (${a.HCC_LOC_SETTING_DESC.toLowerCase()})` : '';
+    // A site "in a hospital" is still a clinic: its kind must not read as one.
+    const setting = a.HCC_LOC_SETTING_DESC && !/all other|clinic/i.test(a.HCC_LOC_SETTING_DESC)
+      ? ` (${/hospital/i.test(a.HCC_LOC_SETTING_DESC) ? 'on a hospital campus' : a.HCC_LOC_SETTING_DESC.toLowerCase()})` : '';
     const web = a.SITE_URL ? (/^https?:\/\//i.test(a.SITE_URL) ? a.SITE_URL : 'https://' + a.SITE_URL.trim()) : null;
     rows.push({ ...p, name: a.SITE_NM, kind: 'Community health center' + setting,
       addr: joinAddr(a.SITE_ADDRESS, a.SITE_CITY), info: a.GRANTEE_NM ? `Operated by ${titleCase(a.GRANTEE_NM)}` : null,
@@ -723,17 +725,19 @@ function placeRegex(placeNames) {
 function nameInfo(name, cat) {
   const raw = String(name || '').toLowerCase().replace(/['’`]/g, '').replace(/&/g, ' and ').replace(/\bsaint\b/g, 'st')
     // "U.S. Bank, N.A." / "U.S. Bank National Association" -> "us bank"
-    .replace(/\bu\.\s?s\.?(?=\s|$)/g, 'us').replace(/,?\s*(\bn\.\s?a\.?|national association)$/, '');
+    .replace(/\bu\.\s?s\.?(?=\s|$)/g, 'us').replace(/,?\s*(\bn\.\s?a\.?|national association)$/, '')
+    .replace(/\buniversity of washington\b/g, 'uw');
   const words = raw.split(/[^a-z0-9]+/).filter(Boolean);
   const stripped = cat.placeRe ? raw.replace(cat.placeRe, ' ') : raw;
   // Store numbers ("QFC 803", "Walgreens #12345", "T-1234") name a branch, not a brand.
   let tok = stripped.split(/[^a-z0-9]+/).filter(w => w.length > 1 && !GENERIC.has(w) && !/^[a-z]?\d+[a-z]?$/.test(w));
+  const withBrands = new Set(tok); // "Swedish Medical Center" and "Swedish First Hill" share a word
   if (cat.brands) { const rest = tok.filter(w => !cat.brands.has(w)); if (rest.length) tok = rest; }
   let decl = null;
   for (const [cls, re] of Object.entries(cat.kindWords || {})) if (re.test(raw)) { decl = cls; break; }
   const plain = words.filter(w => !STOP.has(w));
   return {
-    tok: new Set(tok),
+    tok: new Set(tok), withBrands,
     all: new Set(plain.filter(w => !/^[a-z]?\d+[a-z]?$/.test(w))),
     norm: plain.join(' '),
     num: words.filter(w => /^\d+$/.test(w)).join('-'),
@@ -764,9 +768,10 @@ function sameNameAs(p, q, cat) {
   const o = overlap(A, B);
   return p.src === q.src ? o === 1 : o >= 0.6;
 }
+/** Two names without a single distinctive word in common (brands included). */
 const disjoint = (p, q) => {
-  if (!p.tok.size || !q.tok.size) return false;
-  for (const w of p.tok) if (q.tok.has(w)) return false;
+  if (!p.withBrands.size || !q.withBrands.size) return false;
+  for (const w of p.withBrands) if (q.withBrands.has(w)) return false;
   return true;
 };
 
@@ -776,15 +781,17 @@ const disjoint = (p, q) => {
  *    `nameRadius` for two rows of one class, else the category `radius`,
  *    widened to the positional uncertainty (`approx`, metres) of geocoded or
  *    centroid sources; or
- *  - it comes from another source, is the same class of place (e.g. both
- *    hospitals) within that class's `classRadius`, and the names are not
- *    plainly different (Mary Bridge Children's shares Tacoma General's campus).
+ *  - it comes from another source and is the same class of place (e.g. both
+ *    gas stations) within that class's `classRadius`. Beyond the class's
+ *    `spotRadius` (if set) the names must also share a word: Mary Bridge
+ *    Children's shares Tacoma General's campus, and a park 40 m from another
+ *    park is usually a different park.
  * Distinct places that merely share a building or a campus are kept.
  * groups: [{ rows, approx, inferred }] in priority order; `inferred` marks a
  * source whose classes are guessed from tags (OpenStreetMap).
  */
 function merge(groups, cat) {
-  const { radius, classOf = () => 'x', classRadius = {}, nameRadius = {} } = cat;
+  const { radius, classOf = () => 'x', classRadius = {}, nameRadius = {}, spotRadius = {} } = cat;
   const maxBase = Math.max(radius, ...Object.values(classRadius), ...Object.values(nameRadius));
   // Rows whose uncertainty is wider than a few cells (big parks) live in a
   // coarse grid, so ordinary rows need not search kilometres around them.
@@ -822,7 +829,8 @@ function merge(groups, cat) {
       for (const g of grids) {
         for (const q of around(g, p, Math.max(maxBase, p.approx, g.maxApprox))) {
           const d = metres(p, q);
-          if (q.src !== si && q.cls === p.cls && d < r2 && !disjoint(p, q) && !(p.num && q.num && p.num !== q.num)) { hit = { q, d, rule: 'class' }; break; }
+          if (q.src !== si && q.cls === p.cls && d < r2 && !(p.num && q.num && p.num !== q.num)
+            && !(spotRadius[p.cls] != null && d > spotRadius[p.cls] && disjoint(p, q))) { hit = { q, d, rule: 'class' }; break; }
           if (d < nameR(p, q) && sameNameAs(p, q, cat)) { hit = { q, d, rule: 'name' }; break; }
         }
         if (hit) break;
@@ -847,8 +855,11 @@ function merge(groups, cat) {
 // positional uncertainty in metres (address geocodes, centroids). The other
 // keys tune duplicate detection (see merge()): `classOf` + `classRadius`
 // (same kind of place at the same spot), `nameRadius` (same name nearby),
+// `spotRadius` (beyond it, same-spot matches need a shared name word),
 // `kindWords` (what a name says it is), `crossClassNames: false` (a
 // playground never duplicates a park, nor a charger a gas station).
+/** Hospital kinds, but not "Community health center (on a hospital campus)". */
+const isHospitalKind = k => /hospital|medical center|emergency/i.test(k || '') && !/^community health center/i.test(k || '');
 const OSM_SRC = (id, extra = {}) => ({ id: 'osm', name: 'OpenStreetMap', url: 'https://www.openstreetmap.org/copyright',
   fn: () => osmCategory(id), ...extra });
 const CATEGORIES = {
@@ -860,9 +871,13 @@ const CATEGORIES = {
     OSM_SRC('colleges', { fallbackOnly: true })] },
   health: {
     radius: 150,
-    classOf: r => /hospital|medical center|emergency/i.test(r.kind) ? 'hospital' : /surgery/i.test(r.kind) ? 'asc'
+    classOf: r => isHospitalKind(r.kind) ? 'hospital' : /surgery/i.test(r.kind) ? 'asc'
       : /doctor/i.test(r.kind) ? 'doctor' : /vet center/i.test(r.kind) ? 'vetctr' : 'clinic',
+    // Within 75 m two hospitals from different sources are one (a renamed
+    // hospital: "Highline Medical Center" is St. Anne Hospital); up to 350 m
+    // they are one campus only if the names share a word (see merge()).
     classRadius: { hospital: 350, clinic: 40, asc: 40, doctor: 25, vetctr: 40 },
+    spotRadius: { hospital: 75 },
     // A hospital campus's OSM centre can sit well away from the licensed
     // address point; the same name within 1.5 km is the same hospital.
     nameRadius: { hospital: 1500 },
@@ -891,6 +906,8 @@ const CATEGORIES = {
   grocery: { radius: 60,
     classOf: r => /convenience/i.test(r.kind) ? 'conv' : /farmers/i.test(r.kind) ? 'farm' : 'grocery',
     classRadius: { grocery: 60, conv: 30, farm: 60 },
+    // Stores sit side by side: unrelated names only merge at the same point.
+    spotRadius: { grocery: 10, conv: 10, farm: 10 },
     sources: [
       { id: 'snap', name: 'USDA SNAP-authorized food retailers', url: 'https://www.fns.usda.gov/snap/retailer-locator', fn: snapRetailers, approx: 250 },
       OSM_SRC('grocery')] },
@@ -915,7 +932,9 @@ const CATEGORIES = {
   // centroid vs an entrance): each registry row carries its park's spread as
   // `approx`. Unnamed parks and playgrounds only match at the tight radius.
   parks: { radius: 500, crossClassNames: false,
-    classOf: r => (/playground/i.test(r.kind) ? 'play' : 'park'), classRadius: { park: 60, play: 25 }, sources: [
+    classOf: r => (/playground/i.test(r.kind) ? 'play' : 'park'), classRadius: { park: 60, play: 25 },
+    spotRadius: { park: 10 }, // adjacent parks and gardens are distinct places
+    sources: [
     { id: 'state-parks', name: 'Washington State Parks', url: 'https://parks.wa.gov/find-parks', fn: stateParks },
     { id: 'padus', name: 'USGS PAD-US public parks & recreation areas', url: 'https://www.usgs.gov/programs/gap-analysis-project/science/pad-us-data-overview', fn: padusParks },
     OSM_SRC('parks')] }
