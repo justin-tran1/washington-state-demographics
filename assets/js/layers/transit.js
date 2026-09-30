@@ -103,6 +103,14 @@
     const pending = { routes: false, stops: false };
     const kindOf = popup => (popup && popup._source && popup._source._transitKind) || null;
     const holds = k => !!(openPopups[k] && map.hasLayer(openPopups[k]) && map.getBounds().contains(openPopups[k].getLatLng()));
+    // Checked again when an answer arrives: a popup opened while the request
+    // was in flight (a second stop clicked right after the first) is kept too.
+    function deferIfHeld(k) {
+      if (!holds(k)) return false;
+      pending[k] = true;
+      state[k === 'routes' ? 'lastRoutesKey' : 'lastStopsKey'] = null;
+      return true;
+    }
     map.on('popupopen', e => { const k = kindOf(e.popup); if (k) openPopups[k] = e.popup; });
     map.on('popupclose', e => {
       const k = kindOf(e.popup);
@@ -262,7 +270,7 @@
       const fc = await U.arcgis.query(w.routesUrl, Object.assign({
         outFields: '*', geometryPrecision: 5, maxAllowableOffset: offset
       }, U.arcgis.envelope(bounds)), { pageSize: 2000, maxFeatures: 8000 });
-      if (gen !== state.routesGen) return 0;
+      if (gen !== state.routesGen || deferIfHeld('routes')) return 0;
       addRouteFeatures(fc.features, w.routeFields);
       return fc.features.length;
     }
@@ -290,7 +298,7 @@
             : { type: 'MultiLineString', coordinates: lines }
         });
       }
-      if (gen !== state.routesGen) return 0;
+      if (gen !== state.routesGen || deferIfHeld('routes')) return 0;
       addRouteFeatures(features, null);
       return features.length;
     }
@@ -309,7 +317,7 @@
       const fc = await U.arcgis.query(w.stopsUrl, Object.assign({
         outFields: '*', geometryPrecision: 6
       }, U.arcgis.envelope(bounds)), { pageSize: 2000, maxFeatures: 5000 });
-      if (gen !== state.stopsGen) return 0;
+      if (gen !== state.stopsGen || deferIfHeld('stops')) return 0;
       const markers = [];
       for (const f of fc.features) {
         if (!f.geometry || f.geometry.type !== 'Point') continue;
@@ -335,7 +343,7 @@
         `node["railway"~"^(station|halt|tram_stop)$"](${bbox});` +
         `node["amenity"="ferry_terminal"](${bbox}););out 4000;`;
       const data = await U.overpass.run(ql);
-      if (gen !== state.stopsGen) return 0;
+      if (gen !== state.stopsGen || deferIfHeld('stops')) return 0;
       const markers = [];
       for (const elm of (data.elements || [])) {
         if (elm.lat == null) continue;

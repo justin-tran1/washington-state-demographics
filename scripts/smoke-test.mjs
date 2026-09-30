@@ -413,6 +413,34 @@ assert(/Northgate - Downtown/.test(routePopup), 'route popup falls back to route
 assert(agencySite && routePopup.includes('href="' + agencySite + '"') && /Agency website/.test(routePopup), 'route popup links the agency website (' + agencySite + ')');
 assert(/040\.html/.test(routePopup) && /Route schedule/.test(routePopup), 'route popup links the GTFS route_url schedule page');
 await page.evaluate(() => { WAMAP.map.closePopup(); });
+// Two stop popups in a row: the refresh that the first one's pan deferred
+// must not close the second popup when its answer lands.
+await page.evaluate(() => { WAMAP.map.setView([47.607, -122.325], 16, { animate: false }); });
+await page.waitForTimeout(1500);
+const stopMarkers = () => {
+  const out = [];
+  WAMAP.map.eachLayer(l => { if (l instanceof L.MarkerClusterGroup) l.getLayers().forEach(m => { if (m._transitKind === 'stops') out.push(m); }); });
+  return out;
+};
+const firstStop = await page.evaluate(`(${stopMarkers})().length`);
+assert(firstStop >= 2, `stops load at zoom 16 (${firstStop})`);
+// Pan in small steps until the transit layer's bounds key (2 decimals of the
+// padded bounds) changes, so a refresh is really due while the popup is open.
+const panned = await page.evaluate(`(() => {
+  const s = (${stopMarkers})(); s[1].openPopup();
+  const key = () => { const b = WAMAP.map.getBounds().pad(0.1); return [b.getWest(), b.getSouth(), b.getEast(), b.getNorth()].map(v => v.toFixed(2)).join('|'); };
+  const k0 = key(); let n = 0;
+  while (key() === k0 && n < 80) { WAMAP.map.panBy([10, 0], { animate: false }); n++; }
+  return n;
+})()`);
+assert(panned > 0 && panned < 80, 'test setup: a small pan changes the transit bounds key (' + panned + ' steps)');
+await page.waitForTimeout(1200); // the pan's refresh is deferred while the popup is open
+await page.evaluate(`(() => { const s = (${stopMarkers})(); s[2].openPopup(); })()`);
+await page.waitForTimeout(1500); // the deferred refresh runs when the first popup closes
+const secondPopup = await page.evaluate(() => { const c = document.querySelector('.leaflet-popup-content'); return c ? c.textContent : ''; });
+assert(/Stop 2/.test(secondPopup), 'a second stop popup stays open when the deferred refresh lands: "' + secondPopup.replace(/\s+/g, ' ').trim().slice(0, 60) + '"');
+await page.evaluate(() => { WAMAP.map.closePopup(); WAMAP.map.setView([47.6, -122.4], 11, { animate: false }); });
+await page.waitForTimeout(800);
 
 console.log('· crime');
 await setToggle('card-crime', true);
