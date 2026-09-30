@@ -5,8 +5,8 @@
 // website, and its stop layer carries no agency at all. This step writes
 // data/transit/agencies.json with:
 //   agencies: normAgency(name) -> { name, url, source }
-//   prefixes: route_id/stop_id prefix (e.g. "KCM") -> normAgency(name), for
-//             prefixes whose routes (nearly) all belong to one agency
+//   prefixes: route_id/stop_id prefix (e.g. "KCM") -> normAgency(name) of the
+//             agency running most of that prefix's routes
 // Agency websites come from each agency's own GTFS agency.txt (agency_url),
 // located through the Mobility Database feed catalog; when a feed cannot be
 // matched, the most common origin of the agency's own route_url pages is used.
@@ -103,14 +103,14 @@ export async function buildTransit(outDir) {
     }
   }
   // A feed can carry other agencies' routes (King County Metro's has Sound
-  // Transit Express under KCM_ ids), so a prefix names an agency only when
-  // that agency runs at least 80% of its routes; stops are labelled by it.
+  // Transit Express under KCM_ ids), so a prefix names the agency that runs
+  // most (over half) of its routes; stops are labelled by it.
   const prefixes = {};   // "KCM" -> norm
   const ambiguous = [];
   for (const [pre, byAgency] of Object.entries(prefixRoutes)) {
     const [top, n] = Object.entries(byAgency).sort((x, y) => y[1] - x[1])[0];
     const total = Object.values(byAgency).reduce((a, b) => a + b, 0);
-    if (n / total >= 0.8) prefixes[pre] = top;
+    if (n / total > 0.5) prefixes[pre] = top;
     else ambiguous.push(`${pre} (${Object.entries(byAgency).map(([k, v]) => `${k} ${v}`).join(', ')})`);
   }
   log(`route layer: ${features.length} routes, ${Object.keys(agencies).length} agencies, ${Object.keys(prefixes).length} id prefixes` +

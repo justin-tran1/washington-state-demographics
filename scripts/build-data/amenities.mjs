@@ -741,19 +741,38 @@ function nameInfo(name, cat) {
   const stripped = cat.placeRe ? raw.replace(cat.placeRe, ' ') : raw;
   // Store numbers ("QFC 803", "Walgreens #12345", "T-1234") name a branch, not a brand.
   let tok = stripped.split(/[^a-z0-9]+/).filter(w => w.length > 1 && !GENERIC.has(w) && !/^[a-z]?\d+[a-z]?$/.test(w));
-  const withBrands = new Set(tok); // "Swedish Medical Center" and "Swedish First Hill" share a word
+  const brandsKept = tok.slice(); // "Swedish Medical Center" and "Swedish First Hill" share a word
   if (cat.brands) { const rest = tok.filter(w => !cat.brands.has(w)); if (rest.length) tok = rest; }
   let decl = null;
   for (const [cls, re] of Object.entries(cat.kindWords || {})) if (re.test(raw)) { decl = cls; break; }
   const plain = words.filter(w => !STOP.has(w));
+  // Branch numbers only: after "#", "no", "store", "unit", or trailing a
+  // name ("QFC 803", "7-Eleven 23228 C"). Never a brand that starts with
+  // digits ("7-Eleven", "76", "99 Ranch") or a street address in the name.
+  const nm = raw.match(/(?:#|\bno\.?\s|\bstore\s|\bunit\s)\s*(\d[\d-]*)/) || raw.match(/[a-z)\-]\s+(\d[\d-]*)(?:\s+[a-z])?\s*$/);
   return {
-    tok: new Set(tok), withBrands,
-    all: new Set(plain.filter(w => !/^[a-z]?\d+[a-z]?$/.test(w))),
+    tok: new Set(tok.map(stem)), withBrands: new Set(brandsKept.map(stem)),
+    // "Am/pm" and "ampm", "New Berry" and "Newberry": the words run together.
+    squash: brandsKept.map(stem).join(''),
+    all: new Set(plain.filter(w => !/^[a-z]?\d+[a-z]?$/.test(w)).map(stem)),
     norm: plain.join(' '),
-    num: words.filter(w => /^\d+$/.test(w)).join('-'),
+    num: nm ? nm[1].replace(/^0+(?=\d)/, '') : '',
+    digits: words.filter(w => /\d/.test(w)).join(' '),
     decl
   };
 }
+// Plural and possessive endings: "Sportsman's" / "Sportsman", "Childrens" / "Children's".
+const stem = w => (w.length > 3 && w.endsWith('s') && !w.endsWith('ss') ? w.slice(0, -1) : w);
+// "14434 Ambaum Blvd. SW, Burien" -> "14434 ambaum blvd sw": one street address.
+const STREET_WORDS = { street: 'st', avenue: 'ave', av: 'ave', boulevard: 'blvd', road: 'rd', drive: 'dr', place: 'pl', lane: 'ln',
+  court: 'ct', highway: 'hwy', parkway: 'pkwy', north: 'n', south: 's', east: 'e', west: 'w', northeast: 'ne', northwest: 'nw',
+  southeast: 'se', southwest: 'sw' };
+const addrKey = a => {
+  const s = String(a || '').toLowerCase().split(',')[0].replace(/\./g, '').replace(/\s*#.*$/, '')
+    .replace(/\s+(ste|suite|unit|apt|bldg|building|room|rm|fl|floor)\b.*$/, '');
+  const w = s.split(/[^a-z0-9]+/).filter(Boolean).map(x => STREET_WORDS[x] || x);
+  return w.length >= 2 && /^\d+[a-z]?$/.test(w[0]) ? w.join(' ') : '';
+};
 const overlap = (A, B) => { let c = 0; for (const w of A) if (B.has(w)) c++; return c / Math.max(A.size, B.size); };
 
 /**
@@ -764,7 +783,6 @@ const overlap = (A, B) => { let c = 0; for (const w of A) if (B.has(w)) c++; ret
  */
 function sameNameAs(p, q, cat) {
   if (p.unnamed || q.unnamed) return false;
-  if (p.num && q.num && p.num !== q.num) return false; // two numbered branches of one chain
   if (p.cls !== q.cls) {
     // Only a mis-classified copy of one place matches across classes: the
     // names may not claim different kinds ("Kadlec Clinic" is not "Kadlec
@@ -774,6 +792,7 @@ function sameNameAs(p, q, cat) {
     if (overlap(p.all, q.all) < 0.5) return false;
   }
   const A = p.tok, B = q.tok;
+  if (p.squash.length >= 5 && p.squash === q.squash) return true;
   if (!A.size || !B.size) return p.norm === q.norm;
   const o = overlap(A, B);
   return p.src === q.src ? o === 1 : o >= 0.6;
@@ -782,7 +801,9 @@ function sameNameAs(p, q, cat) {
 const disjoint = (p, q) => {
   if (!p.withBrands.size || !q.withBrands.size) return false;
   for (const w of p.withBrands) if (q.withBrands.has(w)) return false;
-  return true;
+  // "Gastown" / "Gastowne", "Beach Way" / "Beachway": one name inside the other.
+  const [a, b] = p.squash.length <= q.squash.length ? [p.squash, q.squash] : [q.squash, p.squash];
+  return !(a.length >= 4 && b.includes(a));
 };
 
 /**
@@ -822,7 +843,10 @@ function merge(groups, cat) {
     return out;
   };
   const nameR = (p, q) => {
-    if (p.cls !== q.cls) return radius; // weaker evidence: never widened
+    // Across classes the evidence is weaker: the category radius, unless both
+    // names claim the same kind ("Portland VA Medical Center - Vancouver
+    // Division" tagged a hospital in OSM, a clinic in the VA's registry).
+    if (p.cls !== q.cls) return p.decl && p.decl === q.decl && nameRadius[p.decl] != null ? nameRadius[p.decl] : radius;
     const base = nameRadius[p.cls] != null ? nameRadius[p.cls] : Math.max(radius, classRadius[p.cls] || 0);
     return p.src === q.src ? base : Math.max(base, p.approx, q.approx);
   };
@@ -833,7 +857,8 @@ function merge(groups, cat) {
       const unnamed = row.unnamed || !row.name || row.name === row.kind;
       const cls = classOf(row);
       const p = { ...row, name: unnamed ? null : row.name, unnamed, src: si, cls,
-        approx: Math.max(approx, row.approx || 0), ...nameInfo(unnamed ? '' : row.name, cat) };
+        approx: Math.max(approx, row.approx || 0), ...nameInfo(unnamed ? '' : row.name, cat),
+        addrKey: cat.addressMatch ? addrKey(row.addr) : '' };
       // A registry's own classification counts as what the name says; one
       // inferred from OpenStreetMap tags does not.
       if (!p.decl && !inferred && cat.kindWords) p.decl = cls;
@@ -842,8 +867,19 @@ function merge(groups, cat) {
       for (const g of grids) {
         for (const q of around(g, p, Math.max(maxBase, p.approx, g.maxApprox))) {
           const d = metres(p, q);
-          if (q.src !== si && q.cls === p.cls && d < r2 && !(p.num && q.num && p.num !== q.num)
+          if (q.src !== si && q.cls === p.cls && d < r2
             && !(spotRadius[p.cls] != null && d > spotRadius[p.cls] && disjoint(p, q))) { hit = { q, d, rule: 'class' }; break; }
+          // One street address, one kind of place, a shared name word: two
+          // registries geocoding the same site differently (CMS lists FQHCs by
+          // organisation, HRSA by site). Unrelated tenants of one building stay.
+          if (p.addrKey && p.addrKey === q.addrKey && q.src !== si && q.cls === p.cls && d < Math.max(r2, p.approx, q.approx)
+            && !disjoint(p, q)) { hit = { q, d, rule: 'address' }; break; }
+          // Two numbered branches of one chain are never the same place, and a
+          // registry's rows that differ only in numbers ("... 8720 14th Ave S",
+          // "... 8801 14th Ave S") are separate sites; within the same-spot
+          // radius, though, the numbers are just separate listings of one site
+          // (AFDC lists "CITY HALL 1", "CITY HALL 2" for one charging site).
+          if (d > r2 && ((p.num && q.num && p.num !== q.num) || (q.src === si && p.digits !== q.digits))) continue;
           if (d < nameR(p, q) && sameNameAs(p, q, cat)) { hit = { q, d, rule: 'name' }; break; }
         }
         if (hit) break;
@@ -903,6 +939,7 @@ const CATEGORIES = {
     },
     brands: new Set([...HEALTH_BRANDS, 'university']),
     places: true, // town names are stripped before comparing (see placeRegex)
+    addressMatch: true, // same street address + same kind = same site (see merge())
     sources: [
       { id: 'doh', name: 'WA Department of Health licensed hospitals', url: 'https://geo.wa.gov/datasets/626cb2ca35c64ea1a2ac502c573e3ec9', fn: dohHospitals },
       { id: 'cms-hosp', name: 'CMS Provider of Services: hospitals & critical access hospitals', url: 'https://data.hrsa.gov/data/download', fn: cmsHospitals },

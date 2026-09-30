@@ -196,6 +196,18 @@ async function writeIncidents(outDir, id, meta, incidents) {
   return { incidents: rows.length, bytes };
 }
 
+/**
+ * Sanity check on time zones: police reports cluster in the day, so a feed
+ * whose 1-6 am share (Pacific) is far above the normal ~10% has its offset
+ * wrong (Auburn's local times labelled as UTC gave 27%).
+ */
+function logNightShare(label, list) {
+  const hour = new Intl.DateTimeFormat('en-US', { timeZone: 'America/Los_Angeles', hour: 'numeric', hourCycle: 'h23' });
+  const night = list.filter(i => { const h = +hour.format(new Date(i.t)); return h >= 1 && h < 6; }).length;
+  const share = list.length ? night / list.length : 0;
+  log(`${label}: ${(share * 100).toFixed(1)}% of reports fall between 1 and 6 am Pacific${share > 0.2 ? ' - WARNING: the time zone looks wrong' : ''}`);
+}
+
 /** "26400 Block 180TH AVE SE" -> "26400 180TH AVE SE" (the block's first address). */
 const blockToStreet = s => String(s || '').replace(/\s+Block\s+(of\s+)?/i, ' ').replace(/^(\d+)XX\b/i, '$100').replace(/\s+/g, ' ').trim();
 
@@ -233,6 +245,7 @@ async function buildKCSO(outDir) {
     offense: r.nibrs_code_name, addr: r.block_address, city: r.city, zip: r.zip
   }));
   if (list.length < 5000) throw new Error(`only ${list.length} KCSO offenses in the last year`);
+  logNightShare('KCSO', list);
   // The Sheriff's transit police also patrol Sound Transit lines outside King
   // County, so the box spans the Snohomish-King-Pierce service area.
   const located = await geocodeIncidents(list, '', [46.95, -122.75, 48.05, -121.0]);
@@ -276,10 +289,13 @@ async function buildAuburn(outDir) {
   const list = crimes.filter(r => !AUBURN_WITHHELD.test(r.offense.trim())).map(r => {
     const b = toBlock(r.address);
     // The feed mixes "Theft" and "THEFT"; unify, but keep acronyms such as DUI.
-    return { t: parsePacific(r.reported), offense: r.offense.trim().replace(/^[A-Z ]{5,}$/, s => s[0] + s.slice(1).toLowerCase()),
+    // "reported" arrives as "2026-09-27T17:15:00.000Z", but the digits are
+    // Washington wall-clock time (read as UTC, reports would peak at 4-6 am).
+    return { t: parsePacific(String(r.reported).replace(/Z$/i, '')), offense: r.offense.trim().replace(/^[A-Z ]{5,}$/, s => s[0] + s.slice(1).toLowerCase()),
       addr: b ? b.street : '', label: b ? b.label : '', city: 'Auburn' };
   });
   log(`Auburn: ${list.length} reports, ${withheld} withheld (sensitive offense types)`);
+  logNightShare('Auburn', list);
   if (list.length < 2000) throw new Error(`only ${list.length} Auburn crime reports in the last year`);
   // geocodeIncidents reads `addr` (already the block's first address); the
   // published address is the block label.
