@@ -59,7 +59,9 @@ probe "overpass (transit fallback)" POST "https://overpass-api.de/api/interprete
 
 # ===== Called only by the "Build map data" Action (CORS irrelevant) =========
 probe "census ACS summary file dir" GET "https://www2.census.gov/programs-surveys/acs/summary_file/2024/table-based-SF/data/5YRData/"
-probe "tigerweb ACS2024 Tracts" GET "https://tigerweb.geo.census.gov/arcgis/rest/services/Generalized_ACS2024/Tracts_Blocks/MapServer?f=json"
+probe "census cartographic boundary files" GET "https://www2.census.gov/geo/tiger/GENZ2025/shp/"
+probe "census gazetteer files" GET "https://www2.census.gov/geo/docs/maps-data/data/gazetteer/"
+probe "tigerweb ACS2024 Tracts (boundary fallback)" GET "https://tigerweb.geo.census.gov/arcgis/rest/services/Generalized_ACS2024/Tracts_Blocks/MapServer?f=json"
 probe "WA DOH hospitals" GET "https://services8.arcgis.com/rGGrs6HCnw87OFOT/arcgis/rest/services/Hospitals/FeatureServer/0?f=json"
 probe "WA DOH HELMS facilities" GET "https://services8.arcgis.com/rGGrs6HCnw87OFOT/arcgis/rest/services/Facility_HELMS_Report_DEC2025/FeatureServer/0?f=json"
 probe "HRSA CMS facilities" GET "https://gisportal.hrsa.gov/server/rest/services/HealthCareFacilities/CMSApprovedFacilities_FS/MapServer?f=json"
