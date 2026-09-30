@@ -2,7 +2,7 @@
  * Areas reachable by car in 5 / 10 / 15 minutes, computed by the Valhalla
  * open-source routing engine (public FOSSGIS server) over the OpenStreetMap
  * road network. Population/household/income inside each band are estimated by
- * allocating census tracts whose centroid falls inside the band (ACS 5-year).
+ * allocating census tracts whose internal point falls inside the band (ACS 5-year).
  */
 (function () {
   'use strict';
@@ -141,7 +141,7 @@
           `<tr><td><span class="cat-dot" style="background:${U.theme.colors().isochrone[r.minutes]}"></span>≤ ${r.minutes} min</td>` +
           `<td class="num">${U.fmt.int(r.pop)}</td><td class="num">${U.fmt.int(r.hh)}</td>` +
           `<td class="num">${U.fmt.money(r.medInc)}</td></tr>`).join('') +
-        `</tbody></table><div class="hint">*Population-weighted average of tract medians. Tract-centroid allocation, ACS 5-Year ${rows[0] ? rows[0].span : ''}.</div>`;
+        `</tbody></table><div class="hint">*Population-weighted average of tract medians. Tracts allocated by internal point, ACS 5-Year ${rows[0] ? rows[0].span : ''}.</div>`;
     }
 
     // ---- generate / clear -------------------------------------------------

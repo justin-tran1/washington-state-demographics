@@ -283,9 +283,9 @@
 
   const INSURANCE_METRICS = [
     { id: 'uninsured', label: 'Uninsured rate', unit: '%', fmt: 'pct1',
-      value: d => d.pctUninsured, desc: 'Civilian noninstitutionalized population without health insurance coverage (ACS subject table S2701).' },
+      value: d => d.pctUninsured, desc: 'Civilian noninstitutionalized population without health insurance coverage (ACS detailed table B27010; the same measure as subject table S2701).' },
     { id: 'insured', label: 'Insured rate', unit: '%', fmt: 'pct1',
-      value: d => d.pctInsured, desc: 'Civilian noninstitutionalized population with health insurance coverage (ACS subject table S2701).' }
+      value: d => d.pctInsured, desc: 'Civilian noninstitutionalized population with health insurance coverage (ACS detailed table B27010; the same measure as subject table S2701).' }
   ];
 
   // -------------------------------------------------------------- geocoding
@@ -320,7 +320,9 @@
   const AMENITIES = [
     { id: 'schools', label: 'Schools (K-12)', emoji: '🏫', colorToken: 'schools' },
     { id: 'colleges', label: 'Colleges & universities', emoji: '🎓', colorToken: 'colleges' },
-    { id: 'grocery', label: 'Grocery & supermarkets', emoji: '🛒', colorToken: 'grocery' },
+    // About two thirds of SNAP-authorized food retailers are convenience stores.
+    { id: 'grocery', label: 'Grocery & convenience stores', emoji: '🛒', colorToken: 'grocery',
+      kindEmoji: [[/convenience/i, '🏪']] },
     { id: 'restaurants', label: 'Restaurants & cafes', emoji: '🍽️', colorToken: 'restaurants',
       kindEmoji: [[/cafe|coffee/i, '☕']] },
     { id: 'retail', label: 'Retail & shopping', emoji: '🛍️', colorToken: 'retail' },
@@ -517,7 +519,7 @@
         url: 'https://services2.arcgis.com/1UvBaQ5y1ubjUPmd/arcgis/rest/services/Crime_Data/FeatureServer/1',
         fields: { date: 'OccurredOn', offense: ['Public_Nam'], addr: 'City' },
         link: 'https://open.piercecountywa.gov/',
-        note: "Pierce County Sheriff's Department offenses, rolling 12 months, updated monthly: unincorporated Pierce County plus Bonney Lake, Edgewood, Gig Harbor, Puyallup, University Place and others. Locations approximate."
+        note: "Pierce County Sheriff's Department offenses, rolling 12 months, updated monthly: unincorporated Pierce County and the contract cities Edgewood and University Place (cities with their own police, such as Puyallup, Bonney Lake and Gig Harbor, are not included). Locations approximate."
       },
       {
         id: 'yakima', label: 'Yakima', type: 'arcgis',
@@ -548,10 +550,10 @@
       'Median values are ACS estimates and carry margins of error; small tracts have wider error bands. Values suppressed by the Census Bureau are shown as "no data".'
     ]},
     { section: 'Amenities', items: [
-      'Every category is pulled for the whole state each month (no per-view caps or zoom limits) and merged from authoritative registries first, then OpenStreetMap to fill gaps. A point that duplicates one from a registry (the same name nearby, or the same kind of place at the same spot under a compatible name) is dropped; town names, health-system brands and store numbers do not make two names the same. Hover a category in the panel to see how many places each source contributed.',
+      'Every category is pulled for the whole state each month (no per-view caps or zoom limits) and merged from authoritative registries first, then OpenStreetMap to fill gaps. A point that duplicates one already kept is dropped: the same name nearby (town names, health-system brands and store numbers do not count, and the radius widens for address-geocoded registries and large parks), or the same kind of place at the same spot (clinics, pharmacies, banks and fuel stations within 30-45 m whatever their names, since registries and OpenStreetMap often name one place differently; hospitals, grocery stores and parks beyond 30 or 10 m only when their names share a word). Hover a category in the panel to see how many places each source contributed.',
       'Hospitals & clinics: WA Department of Health licensed hospitals; CMS Provider of Services (hospitals, critical access hospitals, federally qualified health centers, rural health clinics, ambulatory surgery centers) via HRSA; Veterans Health Administration facilities; HRSA health center sites; WA DOH local health jurisdiction clinics; plus OpenStreetMap hospitals, clinics, urgent care and doctors\' offices. Hospitals are drawn larger and never clustered.',
       'Pharmacies: WA DOH licensed pharmacies where available, otherwise community pharmacies from the federal NPI registry (NPPES), geocoded by the U.S. Census Bureau; plus OpenStreetMap.',
-      'Grocery: USDA SNAP-authorized food retailers plus OpenStreetMap. Banks & credit unions: FDIC BankFind branches, NCUA credit union branches (geocoded) and OpenStreetMap. Fuel & EV charging: NREL Alternative Fuels Data Center public stations plus OpenStreetMap. Parks: Washington State Parks, USGS PAD-US public parks and recreation areas, and OpenStreetMap parks and playgrounds.',
+      'Grocery & convenience stores: USDA SNAP-authorized food retailers (supermarkets, grocery, convenience and specialty food stores, farmers markets) plus OpenStreetMap; convenience stores, about two thirds of the points, have their own marker. Banks & credit unions: FDIC BankFind branches, NCUA credit union branches (geocoded) and OpenStreetMap. Fuel & EV charging: NREL Alternative Fuels Data Center public stations plus OpenStreetMap. Parks: Washington State Parks, USGS PAD-US public parks and recreation areas, and OpenStreetMap parks and playgrounds.',
       'Schools and colleges: NCES EDGE geocoded locations of public schools, private schools and postsecondary institutions (newest school year). Restaurants & cafes and Retail & shopping: OpenStreetMap, the most complete open statewide source for businesses; completeness varies by area.'
     ]},
     { section: 'Transit', items: [
@@ -568,7 +570,7 @@
     { section: 'Drive-time areas', items: [
       'Isochrones are computed by the Valhalla open-source routing engine (public FOSSGIS server) over the OpenStreetMap road network, using road classes, speed limits and turn costs.',
       'Estimates reflect typical (free-flow to moderate) conditions, not live congestion. Peak-hour drive times in urban areas can be materially longer.',
-      'Population and income inside each band are estimated by allocating whole census tracts whose centroid falls inside the band (ACS 5-year data).'
+      'Population and income inside each band are estimated by allocating whole census tracts whose internal point (Census Gazetteer INTPTLAT/INTPTLONG, always inside the tract) falls inside the band (ACS 5-year data).'
     ]},
     { section: 'Base maps', items: [
       '16 base maps, all keyless and free to use: OpenStreetMap and OSM Humanitarian; Esri Light/Dark Gray Canvas, World Imagery, Streets and Topographic; USGS The National Map (Imagery, Imagery+Topo, Topo, Shaded Relief, Hydrography); OpenTopoMap; OPNVKarte transit; CyclOSM; and WSDOT\'s Washington base map.',

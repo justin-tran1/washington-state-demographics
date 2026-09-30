@@ -35,9 +35,11 @@ The heavy, rate-limited or key-gated sources are fetched **at build time** by
 `.github/workflows/build-data.yml` (monthly, plus weekly for crime incident files, and on
 every change to `scripts/build-data/`) and committed as compact JSON under `data/`. The
 browser loads those files same-origin from GitHub Pages, so no viewer's network has to
-reach the Census API (which has required a key since May 2026), Overpass or a dozen
-registries. A failed source never blocks the others: the last good file stays in place and
-`data/manifest.json` records what each step fetched.
+reach the Census Data API (whose data queries have required a key since May 2026),
+Overpass or a dozen registries. A failed source never blocks the others: its last good data
+stays in place (a failed amenity source's rows, an agency's previous website, the published
+boundaries rather than water-inclusive fallback polygons) and `data/manifest.json` records
+what each step fetched.
 
 | Layer | Source | Notes |
 |---|---|---|
@@ -45,7 +47,7 @@ registries. A failed source never blocks the others: the last good file stays in
 | Boundaries | [Census cartographic boundary files](https://www.census.gov/geographies/mapping-files/time-series/geo/cartographic-boundary.html) (500k, clipped to the shoreline) → `data/geo/` | Tract and county polygons pre-built; TIGERweb and `data/wa_counties.geojson` remain fallbacks |
 | Hospitals & clinics | WA DOH licensed hospitals; CMS Provider of Services (hospitals, CAHs, FQHCs, rural health clinics, surgery centers) via HRSA; VHA facilities; HRSA health center sites; WA DOH public health clinics; OSM | The previous live Overpass query was capped at 600 results per view and printed clinic nodes before hospital campuses, so hospitals were cut off first |
 | Pharmacies | WA DOH licensed pharmacies (HELMS) when available, else the NPPES NPI registry (Census-geocoded); OSM | OSM alone maps well under half of WA pharmacies |
-| Grocery | USDA SNAP-authorized retailers; OSM | |
+| Grocery & convenience stores | USDA SNAP-authorized retailers; OSM | About two thirds are convenience stores (own marker) |
 | Banks & credit unions | FDIC BankFind branches; NCUA call-report credit union branches (Census-geocoded); OSM | |
 | Fuel & EV charging | NREL Alternative Fuels Data Center (public stations); OSM | |
 | Parks & playgrounds | Washington State Parks; USGS PAD-US; OSM | |
@@ -73,16 +75,20 @@ Optional repository secrets: `CENSUS_API_KEY` (Census Data API instead of Summar
 - ACS values are 5-year survey estimates with margins of error; small tracts are noisy.
   Suppressed values render as "no data".
 - Drive-time bands are estimates for typical conditions; peak-hour urban drive times can be
-  materially longer. Population inside bands uses tract-centroid allocation (a tract counts
-  if its centroid is inside the band).
+  materially longer. Population inside bands allocates whole tracts: a tract counts if its
+  Census internal point (Gazetteer INTPTLAT/INTPTLONG, always inside the tract) is in the band.
 - Crime points are reported offenses, not convictions; some records lack coordinates and are
   excluded (the layer says how many). In WASPC's statewide totals, theft includes
   motor-vehicle theft and fraud, and DUI / trespass (arrest-only offenses) are not counted.
-- Amenity points from different sources are de-duplicated by name and proximity: distinctive
-  words must mostly agree (town names, health-system brands and store numbers do not count),
-  the radius widens for geocoded or centroid sources, and unnamed places never match by name.
-  Every hospital the merge drops is listed in the build log. OSM completeness still varies by
-  area for restaurants and retail.
+- Amenity points from different sources are de-duplicated two ways. The same name nearby:
+  distinctive words must mostly agree (town names, health-system brands and store numbers do
+  not count; unnamed places never match), and the radius widens for address-geocoded
+  registries and large parks. The same kind of place at the same spot: clinics, pharmacies,
+  banks and fuel stations from two sources within 30-45 m merge whatever their names, because
+  registries and OSM often name one place differently; hospitals (30 m), grocery stores and
+  parks (10 m) merge beyond that only when their names share a word. Every hospital the merge
+  drops is listed in the build log. OSM completeness still varies by area for restaurants and
+  retail.
 
 ## Architecture
 
@@ -152,7 +158,8 @@ All 16 are keyless, but their terms differ and that matters for commercial use:
   `basemap-styles` licence also restricts the tile services to enterprise customers.
 
 Resilience: every build step is isolated and a failure keeps the last good file; ACS
-vintages, Gazetteer files and TIGERweb services are discovered newest-first; the Seattle
+vintages, Gazetteer files, cartographic boundary files and TIGERweb services are discovered
+newest-first; the Seattle
 adapter resolves column names from the dataset's live metadata (SPD has republished the
 dataset with new columns before) and has domain failover; WSDOT falls back to OSM. Every
 layer shows its own source/status line, and failures degrade per-layer with a visible

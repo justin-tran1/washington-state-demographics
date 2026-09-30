@@ -55,6 +55,7 @@ function acsSubject(rows, level) {
   });
   return out;
 }
+const tigerwebHits = [];
 function boundaryFC(rows, d) {
   return {
     type: 'FeatureCollection',
@@ -184,9 +185,19 @@ function handle(url, method, postData) {
   }
   // TIGERweb
   if (u.hostname === 'tigerweb.geo.census.gov') {
+    tigerwebHits.push(full);
     if (full.includes('Generalized_ACS2024')) return jsonRes({ error: { code: 404, message: 'not found' } });
+    // As on the real services: the generalized layers have no STATE field,
+    // and their tract layer carries no GEOID at all.
+    const generalized = full.includes('Generalized_ACS');
+    const where = u.searchParams.get('where') || '';
+    if (generalized && /STATE/.test(where)) return jsonRes({ error: { code: 400, message: 'Unable to complete operation.', details: ['Invalid query'] } });
     if (full.includes('Tracts_Blocks/MapServer/8/query')) {
-      if (full.includes('returnCentroid=true')) return jsonRes(CENTROIDS_ESRI);
+      if (generalized) {
+        const fc = boundaryFC(TRACTS, 0.045);
+        fc.features.forEach((f, i) => { f.properties = { OBJECTID: i + 1, BASENAME: TRACTS[i].name }; });
+        return jsonRes(fc);
+      }
       return jsonRes(boundaryFC(TRACTS, 0.045));
     }
     if (full.includes('State_County/MapServer/12/query')) return jsonRes(boundaryFC(COUNTIES, 0.35));
@@ -666,6 +677,26 @@ assert(/Origin:/.test(await page.locator('#card-drivetime .origin-line').textCon
 assert(await page.locator('.dt-table tbody tr').count() === 3, 'drive-time bands recomputed after restore');
 const zoomAfter = await page.evaluate(() => WAMAP.map.getZoom());
 assert(zoomAfter === zoomBefore, `map view restored without refit (zoom ${zoomBefore} -> ${zoomAfter})`);
+
+console.log('· boundary fallback (pre-built files unavailable)');
+{
+  const fb = await browser.newPage({ viewport: { width: 1200, height: 800 } });
+  fb.on('pageerror', e => pageErrors.push('fallback page: ' + String(e)));
+  await fb.route('**/*', async route => {
+    const url = route.request().url();
+    if (/\/data\/geo\//.test(url)) return route.fulfill({ status: 404, contentType: 'text/plain', body: 'gone' });
+    const res = handle(url, route.request().method(), route.request().postData());
+    return res === null ? route.continue() : route.fulfill(res);
+  });
+  tigerwebHits.length = 0;
+  await fb.goto(BASE + '/#map=47.61/-122.33/12&layers=demographics', { waitUntil: 'domcontentloaded' });
+  await fb.waitForFunction(() => /tracts loaded|Could not load/.test(document.querySelector('#card-demographics .status-line').textContent), null, { timeout: 20000 }).catch(() => {});
+  const fbStatus = (await fb.locator('#card-demographics .status-line').textContent()).trim();
+  assert(/8 tracts loaded/.test(fbStatus), 'tracts come from TIGERweb when data/geo is unavailable: "' + fbStatus + '"');
+  assert(tigerwebHits.some(h => /\/TIGERweb\/Tracts_Blocks\/MapServer\/8\/query/.test(h)),
+    'a generalized tract layer without GEOID falls through to the detailed service');
+  await fb.close();
+}
 
 await page.screenshot({ path: 'smoke.png', fullPage: false });
 await browser.close();

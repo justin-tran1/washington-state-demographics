@@ -26,7 +26,9 @@
   }
   WAMAP.classifyCrime = classify; // exposed for tests/console inspection
 
-  const AGENCY_TYPE = { city: 'City police', sheriff: "County sheriff (unincorporated areas and contract cities)", other: 'Other agency' };
+  // WASPC reports a sheriff's contract cities (Burien, Shoreline, University
+  // Place...) as agencies of their own, so a sheriff row is unincorporated only.
+  const AGENCY_TYPE = { city: 'City police', sheriff: 'County sheriff (unincorporated areas; contract cities are listed as their own agencies)', other: 'Other agency' };
 
   WAMAP.createCrime = function (opts) {
     const { map, card } = opts;

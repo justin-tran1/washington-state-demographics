@@ -306,7 +306,7 @@
         `<span>${f(stops[i])} – ${f(stops[i + 1])}</span></div>`).join('');
       legendBox.innerHTML =
         `<div class="legend-title">${U.escapeHTML(state.metric.label)}</div>` +
-        `<div class="legend-sub">${level === 'tract' ? 'by census tract' : 'by county'} · quintiles statewide</div>` +
+        `<div class="legend-sub">${level === 'tract' ? 'by census tract' : 'by county'} · ${ramp().length} equal-count classes statewide</div>` +
         rows +
         `<div class="legend-row"><span class="swatch" style="background:${noData()}"></span><span>No data</span></div>` +
         `<div class="legend-src">ACS 5-Year ${acs.span}, U.S. Census Bureau</div>`;

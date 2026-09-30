@@ -358,81 +358,50 @@
   };
 
   // ------------------------------------------------------------- tigerweb
-  // Boundary provider with vintage fallback + service/layer discovery.
+  // Live boundary fallback, used only when the pre-built data/geo files
+  // cannot be loaded. Each root is tried in turn until one answers with
+  // usable features: the generalized services carry GEOID but no STATE field
+  // (and name their fields differently), the detailed service has both.
   const tigerweb = {
-    _resolved: null,
-    async resolve() {
-      if (this._resolved) return this._resolved;
+    _good: {}, // level -> root that answered with usable features
+    async _layerUrl(root, level) {
       const T = CFG.TIGERWEB;
-      let lastErr;
-      for (const root of T.roots) {
+      const svc = `${root}/${level === 'tract' ? T.tractService : T.countyService}`;
+      const layer = arcgis.findLayer(await arcgis.serviceInfo(svc), level === 'tract' ? T.tractLayerName : T.countyLayerName, /label/i);
+      if (!layer) throw new Error(level + ' layer not found');
+      return `${svc}/${layer.id}`;
+    },
+    async _query(level, extra, opts) {
+      const fips = CFG.CENSUS.stateFips;
+      const roots = this._good[level] ? [this._good[level]] : CFG.TIGERWEB.roots;
+      let lastErr = null, emptyAnswer = false;
+      for (const root of roots) {
         try {
-          const tractsSvc = `${root}/${T.tractService}`;
-          const countySvc = `${root}/${T.countyService}`;
-          const [ti, ci] = await Promise.all([arcgis.serviceInfo(tractsSvc), arcgis.serviceInfo(countySvc)]);
-          const tractLayer = arcgis.findLayer(ti, T.tractLayerName, /label/i);
-          const countyLayer = arcgis.findLayer(ci, T.countyLayerName, /label/i);
-          if (!tractLayer || !countyLayer) throw new Error('layers not found');
-          this._resolved = {
-            root,
-            tractUrl: `${tractsSvc}/${tractLayer.id}`,
-            countyUrl: `${countySvc}/${countyLayer.id}`
-          };
-          return this._resolved;
+          const fc = await arcgis.query(await this._layerUrl(root, level), Object.assign({
+            where: /Generalized/.test(root) ? `GEOID LIKE '${fips}%'` : `STATE = '${fips}'`,
+            outFields: '*', geometryPrecision: 5
+          }, extra), opts);
+          const features = [];
+          for (const f of fc.features) {
+            const p = f.properties || {};
+            const geoid = String(p.GEOID || p.GEOID20 || '');
+            if (!f.geometry || !geoid.startsWith(fips)) continue;
+            features.push({ type: 'Feature', geometry: f.geometry, properties: {
+              GEOID: geoid, NAME: p.NAME || p.BASENAME || geoid,
+              AREALAND: p.AREALAND != null ? p.AREALAND : p.ALAND, AREAWATER: p.AREAWATER != null ? p.AREAWATER : p.AWATER
+            } });
+          }
+          if (features.length) { this._good[level] = root; return { type: 'FeatureCollection', features }; }
+          if (fc.features.length) throw new Error('features without GEOID'); // wrong layer shape: next root
+          emptyAnswer = true; // nothing in view here: try the next root, then accept
         } catch (err) { lastErr = err; }
       }
+      if (emptyAnswer) return { type: 'FeatureCollection', features: [] };
+      delete this._good[level];
       throw lastErr || new Error('TIGERweb unavailable');
     },
-    async tractsInView(bounds) {
-      const r = await this.resolve();
-      return arcgis.query(r.tractUrl, Object.assign({
-        where: `STATE = '${CFG.CENSUS.stateFips}'`,
-        outFields: 'GEOID,NAME,AREALAND,AREAWATER',
-        geometryPrecision: 5
-      }, arcgis.envelope(bounds)), { pageSize: 1000, maxFeatures: 6000 });
-    },
-    async counties() {
-      const r = await this.resolve();
-      return arcgis.query(r.countyUrl, {
-        where: `STATE = '${CFG.CENSUS.stateFips}'`,
-        outFields: 'GEOID,NAME,AREALAND,AREAWATER',
-        geometryPrecision: 5
-      }, { pageSize: 100, maxFeatures: 200 });
-    },
-    async tractCentroidsInEnvelope(bounds) {
-      const r = await this.resolve();
-      // Centroids are only emitted in Esri JSON output, so page through f=json
-      // by hand here instead of using arcgis.query.
-      const pts = [];
-      try {
-        let offset = 0;
-        for (;;) {
-          const p = Object.assign({
-            where: `STATE = '${CFG.CENSUS.stateFips}'`,
-            outFields: 'GEOID,AREALAND', returnGeometry: false, returnCentroid: true,
-            outSR: 4326, f: 'json', resultRecordCount: 1000, resultOffset: offset
-          }, arcgis.envelope(bounds));
-          const data = await fetchJSON(r.tractUrl + '/query?' + qs(p), { timeout: 45000 });
-          if (data.error) throw new Error(data.error.message || 'query error');
-          const feats = data.features || [];
-          for (const f of feats) {
-            const c = f.centroid;
-            if (c && c.x !== undefined) {
-              pts.push({ geoid: f.attributes.GEOID, lon: c.x, lat: c.y, aland: f.attributes.AREALAND });
-            }
-          }
-          if (feats.length < 1000 || offset > 8000) break;
-          offset += feats.length;
-        }
-      } catch (e) { /* fall through to geometry-based centroids */ }
-      if (pts.length) return pts;
-      // Fallback: fetch geometry and compute centroids client-side.
-      const fc2 = await this.tractsInView(bounds);
-      return fc2.features.map(f => {
-        const c = geo.polygonCentroid(f.geometry);
-        return c ? { geoid: f.properties.GEOID, lon: c[0], lat: c[1], aland: f.properties.AREALAND } : null;
-      }).filter(Boolean);
-    }
+    tractsInView(bounds) { return this._query('tract', arcgis.envelope(bounds), { pageSize: 1000, maxFeatures: 6000 }); },
+    counties() { return this._query('county', {}, { pageSize: 100, maxFeatures: 200 }); }
   };
 
   // -------------------------------------------------------------- geometry
@@ -455,32 +424,6 @@
       if (geom.type === 'Polygon') return this.polygonContains(geom.coordinates, lon, lat);
       if (geom.type === 'MultiPolygon') return geom.coordinates.some(p => this.polygonContains(p, lon, lat));
       return false;
-    },
-    /** Area-weighted centroid of the largest outer ring of a (Multi)Polygon. */
-    polygonCentroid(geom) {
-      const rings = geom && (geom.type === 'Polygon' ? [geom.coordinates[0]]
-        : geom.type === 'MultiPolygon' ? geom.coordinates.map(p => p[0]) : null);
-      if (!rings || !rings.length) return null;
-      let best = null, bestArea = -1;
-      for (const ring of rings) {
-        let a = 0, cx = 0, cy = 0;
-        for (let i = 0, n = ring.length; i < n; i++) {
-          const [x1, y1] = ring[i], [x2, y2] = ring[(i + 1) % n];
-          const cross = x1 * y2 - x2 * y1;
-          a += cross; cx += (x1 + x2) * cross; cy += (y1 + y2) * cross;
-        }
-        const absA = Math.abs(a);
-        if (absA > bestArea && absA > 1e-12) {
-          bestArea = absA;
-          best = [cx / (3 * a), cy / (3 * a)];
-        }
-      }
-      if (!best && rings[0].length) {
-        let sx = 0, sy = 0;
-        for (const [x, y] of rings[0]) { sx += x; sy += y; }
-        best = [sx / rings[0].length, sy / rings[0].length];
-      }
-      return best;
     },
     /** Rough geodesic area of a GeoJSON polygon geometry, in square miles. */
     areaSqMi(geom) {
