@@ -279,13 +279,16 @@
       addRouteFeatures(fc.features, w.routeFields);
       return fc.features.length;
     }
-    async function osmRouteFeatures(bounds) {
+    const OSM_ROUTE_CAP = 500, OSM_STOP_CAP = 4000;
+    /** OSM route relations in `bounds` as GeoJSON features; `.capped` when Overpass hit its limit. */
+    async function osmRouteFeatures(bounds, signal) {
       const bbox = U.overpass.bbox(bounds);
       const ql = `[out:json][timeout:${CFG.OVERPASS.timeoutS}];` +
         `relation["type"="route"]["route"~"^(bus|trolleybus|light_rail|subway|train|tram|ferry|monorail)$"](${bbox});` +
-        `out geom(${bbox}) 500;`;
-      const data = await U.overpass.run(ql);
+        `out geom(${bbox}) ${OSM_ROUTE_CAP};`;
+      const data = await U.overpass.run(ql, signal);
       const features = [];
+      features.capped = (data.elements || []).length >= OSM_ROUTE_CAP;
       for (const rel of (data.elements || [])) {
         if (rel.type !== 'relation') continue;
         const lines = [];
@@ -361,14 +364,15 @@
       setStops(markers);
       return markers.length;
     }
-    async function osmStops(bounds) {
+    async function osmStops(bounds, signal) {
       const bbox = U.overpass.bbox(bounds);
       const ql = `[out:json][timeout:${CFG.OVERPASS.timeoutS}];(` +
         `node["highway"="bus_stop"](${bbox});` +
         `node["railway"~"^(station|halt|tram_stop)$"](${bbox});` +
-        `node["amenity"="ferry_terminal"](${bbox}););out 4000;`;
-      const data = await U.overpass.run(ql);
+        `node["amenity"="ferry_terminal"](${bbox}););out ${OSM_STOP_CAP};`;
+      const data = await U.overpass.run(ql, signal);
       const out = [];
+      out.capped = (data.elements || []).length >= OSM_STOP_CAP;
       for (const elm of (data.elements || [])) {
         if (elm.lat == null) continue;
         out.push({ lat: elm.lat, lon: elm.lon, id: 'n' + elm.id, name: (elm.tags && elm.tags.name) || 'Transit stop', agency: '', freq: '', source: 'osm' });
@@ -407,7 +411,9 @@
         <div class="popup-src">Source: WSDOT Ferry Routes</div></div>`;
     }
     async function loadFerries() {
-      if (state.ferriesLoaded || state.ferryAttempts >= 3) return;
+      // Overlapping refreshes share one request, so they spend one attempt.
+      if (state.ferriesLoaded || state.ferriesLoading || state.ferryAttempts >= 3) return;
+      state.ferriesLoading = true;
       state.ferryAttempts = (state.ferryAttempts || 0) + 1;
       try {
         const fc = await ferryRoutes();
@@ -421,57 +427,85 @@
         }));
         state.ferriesLoaded = true;
       } catch (e) { /* retried on the next refresh (up to 3 attempts); OSM routes also carry ferries */ }
+      finally { state.ferriesLoading = false; }
     }
 
     // ---- area query (radius & area search) -------------------------------
     const lineParts = g => (!g ? [] : g.type === 'LineString' ? [g.coordinates]
       : g.type === 'MultiLineString' ? g.coordinates : []);
+    // OSM maps each direction of a route as its own relation ("Bus 8: A => B",
+    // "Bus 8: B => A"); they merge on operator + ref + mode, shown as "A ↔ B".
+    const bothWays = name => {
+      const m = String(name || '').match(/^[^:]*:\s*(.+?)\s*(?:=>|->|→)\s*(.+)$/);
+      return m ? m[1] + ' ↔ ' + m[2] : name;
+    };
     function areaRoute(props, rf, geometry) {
       const r = routeInfo(props, rf);
+      const osmRef = !rf && props.ref;
       return {
-        key: [r.agencyName, r.short, r.long, r.t].join('|').toLowerCase(),
-        name: r.title, modeLabel: r.m.label, color: r.m.color, agency: r.agencyName,
+        key: (osmRef ? [r.agencyName, props.ref, r.t] : [r.agencyName, r.short, r.long, r.t]).join('|').toLowerCase(),
+        name: osmRef ? [props.ref, bothWays(props.name)].filter(Boolean).join(' — ') : r.title,
+        modeLabel: r.m.label, color: r.m.color, agency: r.agencyName,
         agencyUrl: r.agency ? r.agency.url : null, schedule: r.schedule,
         lines: lineParts(geometry), popup: () => routePopup(props, rf)
       };
     }
+    /** Line generalisation (degrees) the area query uses for `bounds`: coarser for bigger areas. */
+    function detailFor(bounds) {
+      const span = Math.max(bounds.getEast() - bounds.getWest(), bounds.getNorth() - bounds.getSouth());
+      return span > 1 ? 0.001 : span > 0.25 ? 0.0003 : 0.00005;
+    }
+    const isWSF = name => /washington state ferries|^wsf$/i.test(String(name || '').trim());
     /**
      * Every stop and route (ferries included) whose geometry meets `bounds`,
      * whatever the layer's own view, zoom or on/off state:
      * { source, stops: [{ lat, lon, name, agency, freq, popup() }],
-     *   routes: [{ key, name, modeLabel, color, agency, lines, popup() }], truncated }.
-     * Lines are GeoJSON [lon, lat] arrays.
+     *   routes: [{ key, name, modeLabel, color, agency, lines, popup() }],
+     *   truncated, capped: { stops, routes }, offset }.
+     * `capped` marks a list cut short at the service's limit; `offset` is the
+     * line generalisation used (degrees). Lines are GeoJSON [lon, lat] arrays.
+     * opts.signal cancels the query.
      */
-    async function queryArea(bounds) {
+    async function queryArea(bounds, opts = {}) {
+      const signal = opts.signal;
+      const check = () => { if (signal && signal.aborted) throw U.abortError(); };
       await loadLinks();
-      const span = Math.max(bounds.getEast() - bounds.getWest(), bounds.getNorth() - bounds.getSouth());
-      const offset = span > 1 ? 0.001 : span > 0.25 ? 0.0003 : 0.00005;
+      check();
+      const offset = detailFor(bounds);
       const MAX_ROUTES = 8000, MAX_STOPS = 20000;
-      const out = { source: 'wsdot', stops: [], routes: [], truncated: false };
+      const out = { source: 'wsdot', stops: [], routes: [], truncated: false, capped: { stops: false, routes: false }, offset };
       try {
         const w = await resolveWSDOT();
+        check();
         const env = U.arcgis.envelope(bounds);
         const [rfc, sfc] = await Promise.all([
           U.arcgis.query(w.routesUrl, Object.assign({ outFields: '*', geometryPrecision: 5, maxAllowableOffset: offset }, env),
-            { pageSize: 2000, maxFeatures: MAX_ROUTES }),
+            { pageSize: 2000, maxFeatures: MAX_ROUTES, signal }),
           w.stopsUrl ? U.arcgis.query(w.stopsUrl, Object.assign({ outFields: '*', geometryPrecision: 6 }, env),
-            { pageSize: 2000, maxFeatures: MAX_STOPS }) : Promise.resolve({ features: [] })
+            { pageSize: 2000, maxFeatures: MAX_STOPS, signal }) : Promise.resolve({ features: [] })
         ]);
         for (const f of rfc.features) out.routes.push(areaRoute(f.properties || {}, w.routeFields, f.geometry));
         for (const f of sfc.features) { const s = wsdotStop(f, w); if (s) out.stops.push(s); }
-        out.truncated = rfc.features.length >= MAX_ROUTES || sfc.features.length >= MAX_STOPS;
+        out.capped = { routes: rfc.features.length >= MAX_ROUTES, stops: sfc.features.length >= MAX_STOPS };
       } catch (e) {
+        check();
         out.source = 'osm';
-        const [feats, stops] = await Promise.all([osmRouteFeatures(bounds), osmStops(bounds)]);
+        const [feats, stops] = await Promise.all([osmRouteFeatures(bounds, signal), osmStops(bounds, signal)]);
         for (const f of feats) out.routes.push(areaRoute(f.properties || {}, null, f.geometry));
         out.stops = stops;
+        out.capped = { routes: !!feats.capped, stops: !!stops.capped };
       }
+      out.truncated = out.capped.routes || out.capped.stops;
       for (const s of out.stops) {
         if (!s.agency && s.source === 'wsdot') s.agency = agencyForId(s.id); // agencies.json is loaded by now
         s.popup = () => stopPopupHTML(s);
       }
       try {
         const fc = await ferryRoutes();
+        check();
+        // One entry per WSF route, from the ferry service the map draws: the
+        // GTFS layer (and OSM) list each crossing again, once per direction.
+        out.routes = out.routes.filter(r => !isWSF(r.agency));
         for (const f of fc.features) {
           const name = ferryName(f.properties || {});
           out.routes.push({
@@ -480,7 +514,10 @@
             lines: lineParts(f.geometry), popup: () => ferryPopupHTML(name)
           });
         }
-      } catch (e) { /* ferry routes are optional here */ }
+      } catch (e) {
+        if (e.name === 'AbortError') throw e;
+        /* ferry routes are optional here: the GTFS or OSM ferry routes stay */
+      }
       return out;
     }
 
@@ -564,6 +601,7 @@
     return {
       id: 'transit',
       queryArea,
+      detailFor,
       get enabled() { return state.enabled; },
       setEnabled(on) {
         if (on === state.enabled) return;

@@ -139,12 +139,17 @@
   // ------------------------------------------------------------------ http
   // Relative URLs (same-origin data/ files) have no host of their own.
   const hostOf = url => { try { return new URL(url, location.href).host + (/^https?:/i.test(url) ? '' : '/' + url); } catch (e) { return url; } };
+  function abortError() { const e = new Error('Request cancelled'); e.name = 'AbortError'; return e; }
+  /** opts.signal (an AbortSignal) cancels the request and its retries. */
   async function fetchJSON(url, opts = {}) {
-    const { timeout = 30000, retries = 1, init = {} } = opts;
+    const { timeout = 30000, retries = 1, init = {}, signal } = opts;
     let lastErr;
     for (let attempt = 0; attempt <= retries; attempt++) {
+      if (signal && signal.aborted) throw abortError();
       const ctl = new AbortController();
       const timer = setTimeout(() => ctl.abort(), timeout);
+      const onAbort = () => ctl.abort();
+      if (signal) signal.addEventListener('abort', onAbort, { once: true });
       try {
         const res = await fetch(url, Object.assign({ signal: ctl.signal }, init));
         clearTimeout(timer);
@@ -154,8 +159,11 @@
         catch (e) { throw new Error('Bad JSON from ' + hostOf(url)); }
       } catch (err) {
         clearTimeout(timer);
+        if (signal && signal.aborted) throw abortError();
         lastErr = err;
         if (attempt < retries) await new Promise(r => setTimeout(r, 700 * (attempt + 1)));
+      } finally {
+        if (signal) signal.removeEventListener('abort', onAbort);
       }
     }
     throw lastErr;
@@ -215,10 +223,11 @@
       });
       return { type: 'FeatureCollection', features };
     },
-    /** Query a layer with pagination. Returns a GeoJSON FeatureCollection. */
+    /** Query a layer with pagination. Returns a GeoJSON FeatureCollection. opts.signal cancels it. */
     async query(layerUrl, params = {}, opts = {}) {
       const pageSize = opts.pageSize || 2000;
       const maxFeatures = opts.maxFeatures || 20000;
+      const signal = opts.signal;
       const all = [];
       let offset = 0;
       for (;;) {
@@ -228,13 +237,14 @@
         }, params);
         let fc, exceeded = false;
         try {
-          const data = await fetchJSON(layerUrl + '/query?' + qs(p), { timeout: 45000 });
+          const data = await fetchJSON(layerUrl + '/query?' + qs(p), { timeout: 45000, signal });
           if (data.error) throw new Error(data.error.message || 'query error');
           exceeded = !!(data.exceededTransferLimit || (data.properties && data.properties.exceededTransferLimit));
           fc = p.f === 'geojson' && data.type === 'FeatureCollection' ? data : arcgis.esriToGeoJSON(data);
         } catch (err) {
+          if (err.name === 'AbortError') throw err;
           if (p.f === 'geojson') { // some older servers lack geojson output
-            const data = await fetchJSON(layerUrl + '/query?' + qs(Object.assign({}, p, { f: 'json' })), { timeout: 45000 });
+            const data = await fetchJSON(layerUrl + '/query?' + qs(Object.assign({}, p, { f: 'json' })), { timeout: 45000, signal });
             if (data.error) throw new Error(data.error.message || 'query error');
             exceeded = !!data.exceededTransferLimit;
             fc = arcgis.esriToGeoJSON(data);
@@ -294,25 +304,30 @@
   // -------------------------------------------------------------- overpass
   const overpass = {
     _busy: Promise.resolve(),
-    run(ql) {
+    /** Run a query; `signal` (optional AbortSignal) cancels it, queued or running. */
+    run(ql, signal) {
       // Serialize requests to stay polite with the public endpoints.
-      const job = this._busy.then(() => this._run(ql));
+      const job = this._busy.then(() => this._run(ql, signal));
       this._busy = job.catch(() => {});
       return job;
     },
-    async _run(ql) {
+    async _run(ql, signal) {
       let lastErr;
       for (const ep of CFG.OVERPASS.endpoints) {
+        if (signal && signal.aborted) throw abortError();
         try {
           const res = await fetch(ep, {
-            method: 'POST',
+            method: 'POST', signal,
             headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
             body: 'data=' + encodeURIComponent(ql)
           });
           if (res.status === 429 || res.status === 504) { lastErr = new Error('Overpass busy (' + res.status + ')'); continue; }
           if (!res.ok) { lastErr = new Error('Overpass HTTP ' + res.status); continue; }
           return await res.json();
-        } catch (err) { lastErr = err; }
+        } catch (err) {
+          if (signal && signal.aborted) throw abortError();
+          lastErr = err;
+        }
       }
       throw lastErr || new Error('All Overpass endpoints failed');
     },
@@ -509,7 +524,7 @@
   };
 
   WAMAP.util = {
-    $, $$, el, escapeHTML, fmt, debounce, addLayersChunked, parsePacific, fmtPacific, store, fetchJSON, qs,
+    $, $$, el, escapeHTML, fmt, debounce, addLayersChunked, parsePacific, fmtPacific, store, fetchJSON, abortError, qs,
     arcgis, socrataQuery, socrataColumns, overpass, censusStore, tigerweb, geo, geocode, theme
   };
 })();

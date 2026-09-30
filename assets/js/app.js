@@ -331,8 +331,8 @@
       });
     }
     // Saved circles and areas, once the pins they belong to and the card's
-    // toggle are in place.
-    layers.areas.restore();
+    // toggle are in place. A damaged saved copy must not stop the app.
+    try { layers.areas.restore(); } catch (e) { console.warn('Saved shapes could not be restored', e); }
 
     // ------------------------------------------- shareable URL state (#hash)
     // View, basemap, active layers, choropleth metrics and the drive-time

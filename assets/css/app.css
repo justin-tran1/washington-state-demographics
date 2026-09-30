@@ -365,6 +365,18 @@ select.input { cursor: pointer; }
   border: 2px solid; opacity: .8; cursor: copy;
 }
 .draw-capture { position: absolute; inset: 0; z-index: 690; cursor: crosshair; background: transparent; touch-action: none; }
+/* keyboard drawing: corners go where the crosshair is, at the map's centre */
+.draw-capture.kbd::before, .draw-capture.kbd::after {
+  content: ""; position: absolute; left: 50%; top: 50%; pointer-events: none;
+  background: var(--accent); box-shadow: 0 0 0 1.5px var(--surface);
+}
+.draw-capture.kbd::before { width: 24px; height: 2px; margin: -1px 0 0 -12px; }
+.draw-capture.kbd::after { width: 2px; height: 24px; margin: -12px 0 0 -1px; }
+/* on touch screens the handles take a finger-sized area around the visible dot */
+@media (pointer: coarse) {
+  .area-handle-icon::before, .area-vertex-icon::before { content: ""; position: absolute; inset: -12px; border-radius: 50%; }
+  .area-mid-icon::before { inset: -6px; }
+}
 .draw-bar {
   /* centred without a transform, so its available width is the whole map */
   position: absolute; top: 10px; left: 0; right: 0; margin: 0 auto; width: max-content; z-index: 1050;
