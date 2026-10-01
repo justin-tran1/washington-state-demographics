@@ -688,7 +688,8 @@ select.input { cursor: pointer; }
 .rank-briefs { margin: 0; padding: 0; list-style: none; color: var(--ink-2); font-size: 11.5px; line-height: 1.4; }
 .rank-briefs li { margin: 0 0 2px; }
 .rank-na { color: var(--muted); }
-.rank-off > * { opacity: .55; }
+.rank-off > :not(.rank-crit) { opacity: .55; }
+.rank-off .rank-crit .rank-cl, .rank-off .rank-crit small { color: var(--muted); }
 .rank-total > * { background: var(--plane); }
 .rank-total .rank-crit { background: var(--plane); font-weight: 800; color: var(--ink); }
 .rank-score { font-size: 28px; font-weight: 800; line-height: 1; font-variant-numeric: tabular-nums; color: var(--muted); }
@@ -700,6 +701,12 @@ select.input { cursor: pointer; }
 .rank-label.rank-top { color: var(--ink); }
 .rank-note { font-size: 11.5px; color: var(--muted); margin: 10px 0 0; }
 .rank-empty { padding: 18px; color: var(--ink-2); }
+.rank-info > * { background: var(--plane); }
+.rank-info .rank-crit { background: var(--plane); }
+.rank-nw { font-size: 11px; color: var(--muted); font-style: italic; }
+.rank-icell { color: var(--ink-2); }
+.rank-icell.rank-flag { color: var(--warning); font-weight: 600; }
+.rank-isub { font-size: 11px; color: var(--muted); margin-top: 2px; }
 
 /* file:// warning */
 .file-warning {
@@ -753,6 +760,6 @@ select.input { cursor: pointer; }
   .rank-crit { min-width: 108px; max-width: 118px; font-size: 12px; }
   .rank-crit small { display: none; }
   .rank-crit .rank-ci { display: none; }
-  .rank-w .rank-win { width: 46px; }
+  .rank-w .rank-win { width: 58px; }
   .rank-cell, .rank-site { min-width: 136px; }
 }

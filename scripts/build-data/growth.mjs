@@ -14,7 +14,7 @@
 //   { built, tract: { base, latest, fields, rows: { GEOID: [...] } },
 //     county: { series, vintage, years, rows: { FIPS: [...] } } }
 
-import { readXlsx, log, writeJSON, WA_FIPS } from './lib.mjs';
+import { readXlsx, log, writeJSON, readJSON, WA_FIPS } from './lib.mjs';
 
 const OFM = 'https://ofm.wa.gov/wp-content/uploads/sites/default/files/public/dataresearch/pop';
 export const SAEP_URL = `${OFM}/smallarea/data/xlsx/saep_tract20.xlsx`;
@@ -125,12 +125,19 @@ export async function buildGrowth(outDir) {
   if (tot.hu20 < 2.8e6 || tot.hu20 > 3.6e6 || tot.hu < tot.hu20 * 0.95 || tot.hu > tot.hu20 * 1.4) throw new Error(`implausible housing units ${tot.hu20} -> ${tot.hu}`);
   if (Object.keys(pop.counties).length !== 39) throw new Error(`SAEP lists ${Object.keys(pop.counties).length} counties, not 39`);
 
-  // The newest GMA projection set (published every five years or so).
-  let county = null;
+  // The newest GMA projection set (published every five years or so). Only a
+  // year that is not published (a 4xx answer, or not a workbook) moves on to
+  // an older one; any other failure keeps the projections the last good file had.
+  let county = null, gmaError = null;
   const thisYear = new Date().getUTCFullYear();
-  for (let y = thisYear; y >= 2022 && !county; y--) {
+  for (let y = thisYear; y >= 2022 && !county && !gmaError; y--) {
     let sheets;
-    try { sheets = await readXlsx(GMA_URL(y)); } catch (e) { continue; } // not published for that year
+    try { sheets = await readXlsx(GMA_URL(y)); }
+    catch (e) {
+      if (/HTTP 4\d\d |is not an \.xlsx/.test(e.message)) continue; // not published that year
+      gmaError = e;
+      break;
+    }
     try {
       const g = gmaSheet(sheets, pop.counties);
       const n = Object.keys(g.rows).length;
@@ -145,7 +152,12 @@ export async function buildGrowth(outDir) {
       log(`WARNING GMA ${y} workbook not usable: ${e.message}`);
     }
   }
-  if (!county) log('WARNING no GMA county projection workbook found; the county outlook is left out');
+  const prev = await readJSON(`${outDir}/growth.json`, null);
+  const prevCounty = prev && prev.county && Array.isArray(prev.county.years) && prev.county.rows ? prev.county : null;
+  if (prevCounty && (!county || prevCounty.vintage > county.vintage)) {
+    log(`WARNING GMA projections not refreshed (${gmaError ? gmaError.message : county ? `found ${county.vintage}, older than the ${prevCounty.vintage} set on file` : 'no workbook found'}); keeping the ${prevCounty.vintage} set from the last build`);
+    county = prevCounty;
+  } else if (!county) log(`WARNING no GMA county projections (${gmaError ? gmaError.message : 'no workbook found'}); the county outlook is left out`);
 
   const doc = {
     built: new Date().toISOString(),
@@ -155,5 +167,5 @@ export async function buildGrowth(outDir) {
     county
   };
   const bytes = await writeJSON(`${outDir}/growth.json`, doc);
-  return { latest: pop.latest, tracts: tot.tracts, statePop: tot.pop, gma: county ? county.vintage : null, bytes };
+  return { latest: pop.latest, tracts: tot.tracts, statePop: tot.pop, gma: county ? county.vintage : null, gmaCarried: !!county && county === prevCounty, bytes };
 }

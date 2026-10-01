@@ -1,14 +1,14 @@
 /* Washington Explorer — medical site evaluation.
- * A panel for a dropped pin that scores the spot for a medical clinic from
- * public data, on the six weighted criteria of a healthcare site ranking:
- * market demand & growth (the drive-time catchment's residents weighted by
- * how much care their ages use, and OFM population growth and projections),
- * access & connectivity (arterials, freeway interchanges, transit),
- * competitive positioning (same-type providers per resident; nearby hospitals
- * and care), financial viability (payer mix, income, unemployment), site
- * feasibility (zoning checked against the city's own map, the parcel and
- * parking, slope and flood zone, nearby shelters) and visibility & long-term
- * potential (frontage and traffic counts, the retail corridor, housing growth
+ * A panel for a dropped pin that scores the spot for a medical clinic or a
+ * hospital campus from public data, on six weighted criteria: demand & growth
+ * (the drive-time catchment's residents weighted by how much care their ages
+ * use, and OFM population growth and projections), access & transit
+ * (arterials, freeway interchanges, transit), competition & care nearby
+ * (same-type providers per resident; nearby hospitals and care), payer &
+ * economic strength (payer mix, income, unemployment, the employer base),
+ * zoning & site readiness (zoning checked against the city's own map, the
+ * parcel and parking, slope and flood zone, nearby shelters) and visibility &
+ * outlook (frontage and traffic counts, the retail corridor, housing growth
  * nearby). Each factor scores 0-100 against the anchors in CONFIG.SITE_EVAL;
  * each criterion is shown 1-5; the use type's weights (editable) combine them
  * into a score out of 100, and a short write-up states the result. The same
@@ -342,11 +342,23 @@ node["highway"="motorway_junction"](around:${r.junctionsM},${lat},${lon});out ta
       for (const withId of [true, false]) {
         const headers = { 'Content-Type': 'application/json' };
         if (withId) headers['X-Client-Id'] = CFG.ISOCHRONE.clientId;
+        // A deadline, so a stalled request falls back to straight-line areas instead of hanging.
+        const ctl = new AbortController();
+        let timedOut = false;
+        const timer = setTimeout(() => { timedOut = true; ctl.abort(); }, 30000);
+        const onAbort = () => ctl.abort();
+        if (signal) signal.addEventListener('abort', onAbort, { once: true });
         try {
-          const res = await fetch(ep, { method: 'POST', headers, body, signal });
+          const res = await fetch(ep, { method: 'POST', headers, body, signal: ctl.signal });
           if (!res.ok) throw new Error('HTTP ' + res.status + ' from the routing service');
           return await res.json();
-        } catch (e) { if (e.name === 'AbortError') throw e; lastErr = e; }
+        } catch (e) {
+          if (signal && signal.aborted) throw e;
+          lastErr = timedOut ? new Error('the routing service did not answer within 30 s') : e;
+        } finally {
+          clearTimeout(timer);
+          if (signal) signal.removeEventListener('abort', onAbort);
+        }
       }
     }
     throw lastErr || new Error('routing service unreachable');
@@ -372,14 +384,32 @@ node["highway"="motorway_junction"](around:${r.junctionsM},${lat},${lon});out ta
     return growthPromise;
   }
 
+  // Jobs by place of work (data/jobs.json, LEHD LODES summed to tracts, built monthly).
+  let jobsPromise = null;
+  function loadJobs() {
+    if (!jobsPromise) {
+      jobsPromise = U.fetchJSON(S.jobsData, { timeout: 30000, retries: 1 }).then(j => {
+        if (!j || !Array.isArray(j.fields) || !j.rows) throw new Error('jobs data file is malformed');
+        const iJ = j.fields.indexOf('jobs'), iH = j.fields.indexOf('health');
+        if (iJ < 0) throw new Error('jobs data file has no job counts');
+        const rows = {};
+        let total = 0;
+        for (const [geoid, v] of Object.entries(j.rows)) { rows[geoid] = { jobs: v[iJ] || 0, health: iH >= 0 ? v[iH] || 0 : null }; total += v[iJ] || 0; }
+        return { year: j.year, rows, total };
+      }).catch(e => { jobsPromise = null; throw e; });
+    }
+    return jobsPromise;
+  }
+
   const AGE_KEYS = ['age0_14', 'age15_24', 'age25_44', 'age45_64', 'age65_74', 'age75p'];
   const emptyGrowth = () => ({ pop20: 0, pop: 0, hu20: 0, hu: 0, tracts: 0, huTracts: 0, counties: {} });
   function emptyAgg() {
     return { pop: 0, households: 0, incSum: 0, incPop: 0, ins: 0, employer: 0, direct: 0, medicare: 0, dual: 0, medicaid: 0, military: 0, other: 0, uninsured: 0, tracts: 0,
-      agePop: 0, ages: Object.fromEntries(AGE_KEYS.map(k => [k, 0])), unempSum: 0, unempPop: 0, g: emptyGrowth() };
+      agePop: 0, ages: Object.fromEntries(AGE_KEYS.map(k => [k, 0])), unempSum: 0, unempPop: 0, g: emptyGrowth(), members: {}, jobs: 0, healthJobs: 0, jobTracts: 0 };
   }
-  function addTract(a, row) {
+  function addTract(a, row, geoid) {
     a.pop += row.pop || 0; a.households += row.households || 0; a.tracts++;
+    if (geoid) a.members[geoid] = row.pop || 0; // the tracts in the area, for the ranking's overlap between sites
     if (row.medInc != null && row.pop) { a.incSum += row.medInc * row.pop; a.incPop += row.pop; }
     const w = row.insUniverse || 0;
     if (w && row.pmEmployer != null) {
@@ -408,12 +438,13 @@ node["highway"="motorway_junction"](around:${r.junctionsM},${lat},${lon});out ta
       employer: s('employer'), direct: s('direct'), medicare: s('medicare'), dual: s('dual'), medicaid: s('medicaid'),
       military: s('military'), other: s('other'), uninsured: s('uninsured'),
       ages: a.agePop ? Object.fromEntries(AGE_KEYS.map(k => [k, a.ages[k] / a.agePop])) : null,
-      unemp: a.unempPop ? a.unempSum / a.unempPop : null, growth: a.g.tracts ? a.g : null };
+      unemp: a.unempPop ? a.unempSum / a.unempPop : null, growth: a.g.tracts ? a.g : null, members: a.members,
+      jobs: a.jobTracts ? a.jobs : null, healthJobs: a.jobTracts ? a.healthJobs : null };
   }
   async function fetchCatchment(lat, lon, signal) {
     const minutes = Array.from(new Set(S.profiles.map(p => p.minutes))).sort((a, b) => a - b);
-    const [acs, idx, growth] = await Promise.all([U.censusStore.load('tract'), WAMAP.geoStore.loadTractIndex(),
-      loadGrowth().catch(e => ({ error: e.message || String(e) }))]);
+    const [acs, idx, growth, jobs] = await Promise.all([U.censusStore.load('tract'), WAMAP.geoStore.loadTractIndex(),
+      loadGrowth().catch(e => ({ error: e.message || String(e) })), loadJobs().catch(e => ({ error: e.message || String(e) }))]);
     let bands, source;
     try {
       const data = await requestIsochrones(lat, lon, minutes, signal);
@@ -442,8 +473,8 @@ node["highway"="motorway_junction"](around:${r.junctionsM},${lat},${lon});out ta
     let nearest = null;
     for (const pt of idx) {
       if (Math.abs(pt.lat - lat) > 0.6 || Math.abs(pt.lon - lon) > 0.9) continue;
-      const row = acs.rows[pt.geoid], gr = est && est[pt.geoid];
-      if (gr) {
+      const row = acs.rows[pt.geoid], gr = est && est[pt.geoid], jb = jobs.rows && jobs.rows[pt.geoid];
+      if (gr && gr.hu20 > 0) { // water and airport tracts hold no housing
         const dd = dist(lat, lon, pt.lat, pt.lon);
         if (dd <= S.radii.trajectoryM) addGrowth(ring, gr, pt.geoid);
         if (!nearest || dd < nearest.d) nearest = { d: dd, gr, geoid: pt.geoid };
@@ -452,14 +483,17 @@ node["highway"="motorway_junction"](around:${r.junctionsM},${lat},${lon});out ta
       for (const b of bands) {
         if (!b.test(pt.lat, pt.lon)) continue; // nested areas: each counts its own tracts
         const a = aggs.get(b.key);
-        addTract(a, row);
+        addTract(a, row, pt.geoid);
         if (gr) addGrowth(a.g, gr, pt.geoid);
+        if (jobs.rows) { a.jobTracts++; if (jb) { a.jobs += jb.jobs; a.healthJobs += jb.health || 0; } } // a tract with no jobs on file has none
       }
     }
     if (!ring.tracts && nearest && nearest.d <= 16000) { addGrowth(ring, nearest.gr, nearest.geoid); ring.nearestM = nearest.d; }
     const out = { source, span: acs.span, vintage: acs.vintage, error: bands.error || null, byKey: {}, geoms: {}, tests: {},
       growth: est ? { base: growth.base, latest: growth.latest, county: growth.county, ring: ring.tracts ? ring : null }
-        : { error: (growth && growth.error) || 'population estimates unavailable' } };
+        : { error: (growth && growth.error) || 'population estimates unavailable' },
+      jobs: jobs.rows ? { year: jobs.year, per100: 100 * jobs.total / Object.values(acs.rows).reduce((t, r) => t + (r.pop || 0), 0) }
+        : { error: jobs.error || 'job counts unavailable' } };
     for (const b of bands) { out.byKey[b.key] = finishAgg(aggs.get(b.key)); out.geoms[b.key] = b.geoms; out.tests[b.key] = b.test; }
     return out;
   }
@@ -511,7 +545,7 @@ node["highway"="motorway_junction"](around:${r.junctionsM},${lat},${lon});out ta
   // Each factor returns { score 0-100, fact (a clause for the write-up), brief
   // (a few words for the ranking table), details, sources } or { score: null, na }.
   const EVAL = {
-    zoning(d) {
+    zoning(d, profile) {
       const z = d.zoning;
       if (!z.zone) {
         const j = z.jurisdiction;
@@ -530,11 +564,12 @@ node["highway"="motorway_junction"](around:${r.junctionsM},${lat},${lon});out ta
       const name = p.ZoneName && p.ZoneName !== p.ZoneID ? `${p.ZoneName} (${p.ZoneID})` : (p.ZoneID || p.ZoneName);
       if (z.distanceM > 0) details.push(`The pin sits in a street right-of-way; this is the nearest zone, ${Math.round(z.distanceM)} m away.`);
       if (z.backup) details.push(`${z.jurisdiction.Jurisdiction} has no zoning in the atlas here; the county's zoning is used as the backup.`);
+      if (profile && profile.campus) details.push('The atlas records office uses, not hospitals: codes often treat a hospital as an institutional or conditional use (sometimes with its own zone or master plan), so the office permission is only a first read. Confirm with the jurisdiction.');
       // The panel's bullets carry the right-of-way and backup notes.
       const html = WAMAP.zoningDetailHTML(Object.assign({}, z, { distanceM: 0, backup: false }));
       if (o.score == null) return { score: null, na: o.text, html, details };
       const brief = `${p.ZoneID || p.ZoneName}: ${o.basis === 'office' ? ZONE_BRIEF[o.score] || 'see use table' : o.score >= 70 ? 'usually allowed' : o.score >= 40 ? 'sometimes allowed' : 'rarely allowed'}`;
-      return { score: o.score, html, details, brief,
+      return { score: o.score, html, details, brief, basis: o.basis,
         fact: `it is zoned ${name} in ${p.Jurisdiction}, where ${lower(o.text).replace(/\.$/, '')}` };
     },
     demand(d, profile) {
@@ -595,7 +630,7 @@ node["highway"="motorway_junction"](around:${r.junctionsM},${lat},${lon});out ta
         brief = `${pct(need)} Medicaid or uninsured`;
       } else {
         const cs = ramp(commercial, P.commercial), is = a.medInc != null ? ramp(a.medInc, P.income) : cs;
-        s = profile.id === 'multi' ? 0.5 * cs + 0.3 * is + 0.2 * ramp(medicare, P.medicare) : 0.6 * cs + 0.4 * is;
+        s = profile.id === 'multi' || profile.campus ? 0.5 * cs + 0.3 * is + 0.2 * ramp(medicare, P.medicare) : 0.6 * cs + 0.4 * is;
         fact = `${pct(commercial)} of nearby residents have employer or direct-purchase coverage and the typical household income is about ${money(a.medInc)}`;
         brief = `${pct(commercial)} commercial · ${a.medInc != null ? '$' + short(a.medInc) : '—'}`;
       }
@@ -603,7 +638,7 @@ node["highway"="motorway_junction"](around:${r.junctionsM},${lat},${lon});out ta
         details: [`Payer mix ${c.basis} (each person counted once): employer ${pct(a.employer, 1)}, direct-purchase ${pct(a.direct, 1)}, Medicare ${pct(a.medicare, 1)}, Medicaid ${pct(a.medicaid, 1)} (dual eligible ${pct(a.dual, 1)}), military ${pct(a.military, 1)}, other ${pct(a.other, 1)}, uninsured ${pct(a.uninsured, 1)}.`,
           `Median household income: ${money(a.medInc)} (population-weighted average of tract medians).`,
           profile.id === 'chc' ? 'For a community health center, a larger Medicaid and uninsured share means more of the people it serves.' :
-            profile.id === 'multi' ? 'Weighs commercial coverage (50%), income (30%) and Medicare share (20%, specialty use rises with age).' : 'Weighs commercial coverage (60%) and income (40%).'],
+            profile.id === 'multi' || profile.campus ? 'Weighs commercial coverage (50%), income (30%) and Medicare share (20%, specialty and inpatient use rise with age).' : 'Weighs commercial coverage (60%) and income (40%).'],
         sources: [`ACS 5-Year ${esc(d.catchment.span)} tables B27010, C27007, B19013`] };
     },
     market(d, profile) {
@@ -615,6 +650,21 @@ node["highway"="motorway_junction"](around:${r.junctionsM},${lat},${lon});out ta
         details: [`Unemployment ${c.basis}: ${u.toFixed(1)}% of the civilian labor force (population-weighted average of tract rates).`,
           'A tight labor market points to a stronger local economy and more residents with employer coverage (it can also make staff harder to hire).'],
         sources: [`ACS 5-Year ${esc(d.catchment.span)} table B23025`] };
+    },
+    employer(d, profile) {
+      const c = catchmentFor(d, profile), J = d.catchment.jobs;
+      if (!c) return { score: null, na: 'The catchment could not be computed.' };
+      if (!J || J.error) return { score: null, na: `Job counts are unavailable (${(J && J.error) || 'no data'}).` };
+      const a = c.agg;
+      if (!(a.pop > 0) || a.jobs == null) return { score: null, na: 'No residents in the catchment to compare with.' };
+      const per = 100 * a.jobs / a.pop;
+      return { score: ramp(per, S.employer.perResident),
+        fact: `about ${approx(a.jobs)} people work ${c.where} (${Math.round(per)} jobs per 100 residents)`,
+        brief: `${short(a.jobs)} jobs · ${Math.round(per)} per 100 residents`,
+        details: [`Jobs located ${c.basis}: ${int(a.jobs)} (${J.year}, all jobs by place of work), against ${int(a.pop)} residents: ${Math.round(per)} jobs per 100 residents${isFinite(J.per100) ? ` (Washington: ${Math.round(J.per100)})` : ''}.`,
+          `Health care and social assistance jobs among them: ${int(a.healthJobs || 0)}.`,
+          'An employment center brings employer-sponsored coverage and daytime visits from people who work nearby.'],
+        sources: [`LEHD Origin-Destination Employment Statistics ${J.year}, workplace area characteristics (U.S. Census Bureau)`] };
     },
     access(d) {
       const roads = d.roads.roads, A = S.access;
@@ -651,13 +701,16 @@ node["highway"="motorway_junction"](around:${r.junctionsM},${lat},${lon});out ta
         sources: [t.source === 'osm' ? 'OpenStreetMap stops and routes (WSDOT unreachable)' : 'WSDOT statewide GTFS'] };
     },
     site(d, profile, sqft) {
-      const P = S.site, par = d.parcel, osm = d.osm;
-      const codeMin = d.zoning && d.zoning.zone && d.zoning.zone.MinParkingOffice > 0 && d.zoning.zone.MinParkingOffice < 999 ? d.zoning.zone.MinParkingOffice : null;
+      const P = S.site, par = d.parcel, osm = d.osm, noun = profile.noun || 'clinic';
+      const codeMin = d.zoning && d.zoning.zone && d.zoning.zone.MinParkingOffice > 0 && d.zoning.zone.MinParkingOffice < 999 && !profile.campus ? d.zoning.zone.MinParkingOffice : null;
       const ratio = Math.max(profile.parkingPer1000, codeMin || 0);
       const stalls = Math.ceil(sqft / 1000 * ratio);
-      const footprint = sqft / (sqft > P.oneStoryMaxSqft ? 2 : 1);
-      const need = (footprint + stalls * P.stallSqft) * P.overhead;
-      const details = [`A ${int(sqft)} sf ${lower(profile.label)} needs about ${int(stalls)} parking stalls at ${ratio} per 1,000 sf${codeMin && codeMin >= profile.parkingPer1000 ? ' (the zone\'s office minimum)' : ''}, and about ${(need / 43560).toFixed(2)} acres for a ${sqft > P.oneStoryMaxSqft ? 'two' : 'one'}-story building with surface parking.`];
+      const stories = profile.stories || (sqft > P.oneStoryMaxSqft ? 2 : 1);
+      const built = (sqft / stories + stalls * P.stallSqft) * P.overhead;
+      const need = Math.max(built, (profile.minAcres || 0) * 43560);
+      const acresNeed = (need / 43560).toFixed(need >= 43560 * 10 ? 0 : need >= 43560 ? 1 : 2);
+      const details = [`A ${int(sqft)} sf ${noun} needs about ${int(stalls)} parking stalls at ${ratio} per 1,000 sf${codeMin && codeMin >= profile.parkingPer1000 ? ' (the zone\'s office minimum)' : ''}, and about ${(built / 43560).toFixed(2)} acres for a ${stories === 1 ? 'one' : stories === 2 ? 'two' : stories}-story building with surface parking.`];
+      if (profile.minAcres) details.push(`A ${noun} is planned on ${profile.minAcres} acres or more (room for the building, parking, future expansion and buffers), so the site is measured against ${acresNeed} acres. Campuses are often assembled from several parcels; this checks only the parcel at the pin.`);
       if (codeMin && codeMin < profile.parkingPer1000) details.push(`The zone's office parking minimum is ${codeMin} per 1,000 sf; medical users typically want ${profile.parkingPer1000}.`);
       let fit = null, fact = null, brief = null;
       if (par && !par.none) {
@@ -667,12 +720,13 @@ node["highway"="motorway_junction"](around:${r.junctionsM},${lat},${lon});out ta
         if (par.props.VALUE_LAND != null) details.push(`Assessed land ${money(par.props.VALUE_LAND)}${par.props.VALUE_BLDG != null ? ', building ' + money(par.props.VALUE_BLDG) : ''}.`);
         if (par.distanceM > 0) details.push(`The pin is ${Math.round(par.distanceM)} m outside any parcel (likely a street); this is the nearest one.`);
         fact = par.sqft >= need
-          ? `the ${par.acres.toFixed(1)}-acre parcel has room for a ${int(sqft)} sf clinic and its ${int(stalls)} parking stalls`
-          : `the ${par.acres.toFixed(2)}-acre parcel is smaller than the roughly ${(need / 43560).toFixed(1)} acres a ${int(sqft)} sf clinic with ${int(stalls)} stalls typically needs`;
-        brief = `${par.acres.toFixed(par.acres < 10 ? 1 : 0)} ac · ${par.sqft >= need ? 'fits' : 'tight'}${par.vacant ? ' · vacant' : ''}`;
+          ? `the ${par.acres.toFixed(1)}-acre parcel has room for a ${int(sqft)} sf ${noun}${profile.campus ? '' : ` and its ${int(stalls)} parking stalls`}`
+          : `the ${par.acres.toFixed(2)}-acre parcel is smaller than the roughly ${acresNeed} acres a ${int(sqft)} sf ${noun}${profile.campus ? '' : ` with ${int(stalls)} stalls`} typically needs`;
+        brief = `${par.acres.toFixed(par.acres < 10 ? 1 : 0)} ac · ${par.sqft >= need ? 'fits' : profile.campus && par.sqft < need * 0.6 ? 'needs assembly' : 'tight'}${par.vacant ? ' · vacant' : ''}`;
       } else if (par && par.none) details.push('No tax parcel found at the pin.');
+      // A campus builds its own parking; for a clinic, mapped lots nearby count.
       let park = null;
-      if (osm) {
+      if (osm && !profile.campus) {
         const lots = osm.parking.filter(p => !p.street && !/private/.test(p.access));
         const onParcel = par && !par.none ? lots.filter(p => U.geo.geometryContains(par.geometry, p.lon, p.lat)) : [];
         const pool = onParcel.length ? onParcel : lots.filter(p => p.d <= 120);
@@ -680,7 +734,7 @@ node["highway"="motorway_junction"](around:${r.junctionsM},${lat},${lon});out ta
         park = ramp(n / stalls, P.parking);
         details.push(pool.length ? `Mapped parking ${onParcel.length ? 'on the parcel' : 'within 400 ft'}: about ${int(n)} stalls in ${plural(pool.length, 'lot', 'lots')}${pool.some(p => p.estimated) ? ' (stall counts estimated from lot area where not tagged)' : ''}.`
           : 'No public or customer parking lots are mapped within 400 ft (OpenStreetMap coverage varies).');
-        if (!fact) fact = pool.length ? `about ${int(n)} mapped parking stalls are within 400 ft, against the ~${int(stalls)} a ${int(sqft)} sf clinic needs` : `no parking lots are mapped within 400 ft, against the ~${int(stalls)} stalls a ${int(sqft)} sf clinic needs`;
+        if (!fact) fact = pool.length ? `about ${int(n)} mapped parking stalls are within 400 ft, against the ~${int(stalls)} a ${int(sqft)} sf ${noun} needs` : `no parking lots are mapped within 400 ft, against the ~${int(stalls)} stalls a ${int(sqft)} sf ${noun} needs`;
         if (!brief) brief = `${int(n)} of ${int(stalls)} stalls mapped`;
       }
       let s;
@@ -688,11 +742,11 @@ node["highway"="motorway_junction"](around:${r.junctionsM},${lat},${lon});out ta
       else s = fit != null ? fit : park;
       if (s == null) {
         const why = [par && par.none ? 'no tax parcel was found at the pin' : 'the parcel could not be loaded',
-          osm ? null : 'mapped parking could not be loaded (OpenStreetMap did not answer)'].filter(Boolean);
+          osm || profile.campus ? null : 'mapped parking could not be loaded (OpenStreetMap did not answer)'].filter(Boolean);
         return { score: null, na: cap(why.join(' and ')) + '.', details };
       }
       return { score: s, fact, brief, details,
-        sources: ['Washington State parcels (WA Geospatial Portal)', 'OpenStreetMap parking', 'zoning atlas parking minimums'],
+        sources: ['Washington State parcels (WA Geospatial Portal)'].concat(profile.campus ? [] : ['OpenStreetMap parking', 'zoning atlas parking minimums']),
         links: par && par.link ? [[par.link, 'County assessor record']] : [] };
     },
     health(d) {
@@ -738,14 +792,16 @@ node["highway"="motorway_junction"](around:${r.junctionsM},${lat},${lon});out ta
       if (profile.id === 'urgent') { n = inCatch.filter(x => URGENT.test(x.kind)).length; what = 'urgent care centers'; }
       else if (profile.id === 'chc') { n = inCatch.filter(x => SAFETY_NET.test(x.kind)).length; what = 'community, rural and public health clinics'; base = c.agg.pop * ((c.agg.medicaid || 0) + (c.agg.uninsured || 0)) / 100; }
       else if (profile.id === 'multi') { n = inCatch.filter(x => !URGENT.test(x.kind)).length; what = 'hospitals, surgery centers, clinics and practices'; }
+      else if (profile.campus) { n = inCatch.filter(x => HOSPITAL.test(x.kind) && !/psychiatric/i.test(x.kind)).length; what = 'general and critical access hospitals'; }
       else { n = inCatch.filter(x => PRIMARY.test(x.kind)).length; what = 'clinics, practices and health centers'; }
       per = base > 0 ? n / (base / 10000) : null;
       const s = per == null ? null : ramp(per, S.competition[profile.id]);
       if (s == null) return { score: null, na: 'No residents in the catchment to compare with.' };
+      const perText = profile.campus ? `${(per * 10).toFixed(1)} per 100,000 residents` : `${per.toFixed(1)} per 10,000 ${profile.id === 'chc' ? 'Medicaid or uninsured residents' : 'residents'}`;
       return { score: s,
-        fact: `${plural(n, 'competing site is', 'competing sites are')} mapped ${c.label === `${profile.minutes}-minute drive` ? 'within the ' + c.label : 'in the ' + c.label} (${per.toFixed(1)} per 10,000 ${profile.id === 'chc' ? 'Medicaid or uninsured residents' : 'residents'})`,
-        brief: `${n} competing · ${per.toFixed(1)} per 10k`,
-        details: [`Mapped ${what} ${c.basis}: ${n}.`, `Density: ${per.toFixed(2)} per 10,000 ${profile.id === 'chc' ? 'Medicaid or uninsured residents' : 'residents'}.`,
+        fact: `${plural(n, profile.campus ? 'hospital is' : 'competing site is', profile.campus ? 'hospitals are' : 'competing sites are')} mapped ${c.label === `${profile.minutes}-minute drive` ? 'within the ' + c.label : 'in the ' + c.label} (${perText})`,
+        brief: profile.campus ? `${n} hospitals · ${(per * 10).toFixed(1)} per 100k` : `${n} competing · ${per.toFixed(1)} per 10k`,
+        details: [`Mapped ${what} ${c.basis}: ${n}.`, `Density: ${profile.campus ? (per * 10).toFixed(2) + ' per 100,000 residents' : per.toFixed(2) + ' per 10,000 ' + (profile.id === 'chc' ? 'Medicaid or uninsured residents' : 'residents')}.`,
           'Registries list hospitals, health centers and surgery centers completely; private practices come from OpenStreetMap and are undercounted, so treat this as indicative.'],
         sources: ['The amenities layer\'s health facilities, within the drive-time area'] };
     },
@@ -786,8 +842,10 @@ node["highway"="motorway_junction"](around:${r.junctionsM},${lat},${lon});out ta
         sources: ['OpenStreetMap social facilities'] };
     },
     visibility(d) {
-      const V = S.visibility, roads = d.roads ? d.roads.roads : [], sec = d.traffic ? d.traffic.sections[0] : null;
-      if (!d.roads && !d.traffic) return { score: null, na: 'Road and traffic data were unavailable.' };
+      const V = S.visibility, sec = d.traffic ? d.traffic.sections[0] : null;
+      // Frontage needs the road network; without traffic counts, passing traffic is taken as typical for the road.
+      if (!d.roads) return { score: null, na: 'Road data could not be loaded, so frontage was not scored.' };
+      const roads = d.roads.roads;
       // Frontage: the road the site is best seen from.
       let best = { s: V.none, road: null };
       for (const r of roads) {
@@ -799,19 +857,19 @@ node["highway"="motorway_junction"](around:${r.junctionsM},${lat},${lon});out ta
       const r = best.road;
       // Passing traffic: a WSDOT count on a state route within 150 m, else what the road's class typically carries.
       const tr = sec ? ramp(sec.aadt, V.aadt) : r ? V.classTraffic[r.cls] : V.none;
-      const s = d.roads ? 0.6 * best.s + 0.4 * tr : tr;
+      const s = 0.6 * best.s + 0.4 * tr;
       const roadName = x => (x.name ? x.name : cap(KIND[x.cls]));
       let fact;
       if (sec && r && r.sr && r.sr === sec.route) fact = `${roadName(r)} passes ${miles(r.d)} away carrying about ${approx(sec.aadt)} vehicles a day`;
       else if (sec) fact = `${r ? `${roadName(r)} passes ${miles(r.d)} away, ` : ''}near ${sec.route || 'a state route'} (about ${approx(sec.aadt)} vehicles a day)`;
-      else if (r) fact = `${r.name ? r.name + ', ' : ''}${KIND[r.cls]}, passes ${miles(r.d)} away (no state traffic count nearby)`;
-      else fact = d.roads ? 'no arterial passes within 1,000 ft, so the site has little drive-by visibility' : 'no traffic count was found nearby';
+      else if (r) fact = `${r.name ? r.name + ', ' : ''}${KIND[r.cls]}, passes ${miles(r.d)} away${d.traffic ? ' (no state traffic count nearby)' : ''}`;
+      else fact = 'no arterial or collector passes close enough for drive-by visibility';
       const details = [];
       if (r) details.push(`Best frontage: ${r.name || 'unnamed road'} (${r.desc || KIND_SHORT[r.cls]}), ${miles(r.d)} from the pin.`);
-      else if (d.roads) details.push('No arterial or collector within 1,000 ft.');
+      else details.push('No arterial within 1,000 ft, collector within 500 ft or minor collector within 200 ft.');
       if (sec) details.push(`${sec.route || 'State route'} traffic: ${int(sec.aadt)} vehicles a day (${sec.year} annual average, WSDOT), ${miles(sec.d)} from the pin.`);
-      else details.push(`No WSDOT traffic count within ${S.radii.trafficM} m${r ? `; passing traffic is taken as typical for ${KIND[r.cls]}` : ''}.`);
-      details.push('Scored on frontage (60%) and passing traffic (40%).');
+      else details.push(`${d.traffic ? `No WSDOT traffic count within ${S.radii.trafficM} m` : 'WSDOT traffic counts could not be checked'}${r ? `; passing traffic is taken as typical for ${KIND[r.cls]}` : ''}.`);
+      details.push(`Scored on frontage (60%) and passing traffic (40%${sec ? '' : ', taken as typical for the road'}).`);
       return { score: s, fact, details,
         brief: sec ? `${short(sec.aadt)} vehicles/day` : r ? `${miles(r.d)} to ${KIND_SHORT[r.cls]}` : 'little drive-by visibility',
         sources: ['WSDOT federal functional classification and traffic counts'] };
@@ -834,10 +892,10 @@ node["highway"="motorway_junction"](around:${r.junctionsM},${lat},${lon});out ta
         sources: ['Washington OFM Small Area Estimates (census tract housing units)'] };
     }
   };
-  const NEEDS = { zoning: ['zoning'], demand: ['catchment'], growth: ['catchment'], payer: ['catchment'], market: ['catchment'], access: ['roads'],
+  const NEEDS = { zoning: ['zoning'], demand: ['catchment'], growth: ['catchment'], payer: ['catchment'], market: ['catchment'], employer: ['catchment'], access: ['roads'],
     transit: ['transit'], visibility: ['roads', 'traffic'], site: ['parcel', 'osm'], health: ['amenities'], amenities: ['amenities'],
     competition: ['catchment', 'amenities'], terrain: ['elevation', 'flood'], shelters: ['osm'], trajectory: ['catchment'] };
-  const ANY_OF = { site: true, terrain: true, visibility: true }; // scored when any one of their sources answered
+  const ANY_OF = { site: true, terrain: true, visibility: true }; // scored when any one of their sources answered (visibility needs roads)
 
   // ------------------------------------------------------------ weights
   const CAT_IDS = S.categories.map(c => c.id);
@@ -864,16 +922,25 @@ node["highway"="motorway_junction"](around:${r.junctionsM},${lat},${lon});out ta
   const factorWeight = (profile, c) => (profile.factorWeights && profile.factorWeights[c.id] != null ? profile.factorWeights[c.id] : c.w);
   function gradeOf(score) { const g = S.scale.find(([min]) => score >= min) || S.scale[S.scale.length - 1]; return { n: g[1], label: g[2] }; }
 
-  // Use type and building size, shared by the panel and the ranking.
-  const prefs = { profile: S.profiles[0], sqft: S.defaultSqft };
+  // Use type and building size (kept for each use type), shared by the panel and the ranking.
+  const SQFT_MIN = 1000, SQFT_MAX = 2000000;
+  const okSqft = v => typeof v === 'number' && v >= SQFT_MIN && v <= SQFT_MAX;
+  const prefs = {
+    profile: S.profiles[0], sqftBy: {},
+    get sqft() { const v = this.sqftBy[this.profile.id]; return okSqft(v) ? v : this.profile.defaultSqft || S.defaultSqft; }
+  };
   try {
     const saved = U.store.get('siteEvalPrefs');
-    if (saved) { prefs.profile = S.profiles.find(p => p.id === saved.profile) || prefs.profile; prefs.sqft = saved.sqft >= 1000 && saved.sqft <= 500000 ? saved.sqft : prefs.sqft; }
+    if (saved) {
+      prefs.profile = S.profiles.find(p => p.id === saved.profile) || prefs.profile;
+      if (saved.sqftBy && typeof saved.sqftBy === 'object') for (const p of S.profiles) { if (okSqft(saved.sqftBy[p.id])) prefs.sqftBy[p.id] = saved.sqftBy[p.id]; }
+      else if (okSqft(saved.sqft)) for (const p of S.profiles) { if (!p.defaultSqft) prefs.sqftBy[p.id] = saved.sqft; } // before sizes were kept per use type
+    }
   } catch (e) { /* optional */ }
   function setPrefs(p) {
     if (p.profile) prefs.profile = S.profiles.find(x => x.id === p.profile) || prefs.profile;
-    if (p.sqft >= 1000 && p.sqft <= 500000) prefs.sqft = Math.round(p.sqft);
-    U.store.set('siteEvalPrefs', { profile: prefs.profile.id, sqft: prefs.sqft });
+    if (okSqft(p.sqft)) prefs.sqftBy[prefs.profile.id] = Math.round(p.sqft);
+    U.store.set('siteEvalPrefs', { profile: prefs.profile.id, sqftBy: prefs.sqftBy });
     changed();
   }
 
@@ -933,17 +1000,23 @@ node["highway"="motorway_junction"](around:${r.junctionsM},${lat},${lon});out ta
     if (z.status === 'ok') out.push(cap(z.fact) + (res.gated ? '; this caps the rating until a rezone or use approval is confirmed.' : '.'));
     else if (z.status === 'na' || z.status === 'error') out.push(`Zoning could not be confirmed from the state atlas${z.na ? ' (' + lower(z.na).replace(/\.$/, '') + ')' : ''}.`);
     const cats = res.categories.filter(c => c.status === 'ok' && c.w > 0);
-    const facts = c => c.factors.filter(f => f.status === 'ok' && f.fact && f.id !== 'zoning');
-    const top = c => facts(c).sort((a, b) => b.w * b.score - a.w * a.score)[0];
-    const low = c => facts(c).sort((a, b) => b.w * (100 - b.score) - a.w * (100 - a.score))[0];
+    // Under each heading, quote the factor that drives the criterion that way
+    // and fits the heading itself (a strong criterion can hold a weak factor);
+    // when that factor is zoning, the line is left out: zoning has its own sentence.
+    const facts = c => c.factors.filter(f => f.status === 'ok' && f.fact);
+    const byGain = (a, b) => b.w * b.score - a.w * a.score, byLoss = (a, b) => b.w * (100 - b.score) - a.w * (100 - a.score);
+    const notZoning = f => (f && f.id !== 'zoning' ? f : undefined);
+    const top = c => notZoning(facts(c).sort(byGain).find(f => f.id === 'zoning' || f.score >= 70));
+    const low = (c, max = 50) => notZoning(facts(c).sort(byLoss).find(f => f.id === 'zoning' || f.score < max));
+    const soso = c => low(c, 70);
     const said = new Set();
     const line = (c, f) => { said.add(f.id); return `${lower(c.label)} (${c.grade.n} of 5): ${f.fact}`; };
     const strong = cats.filter(c => c.score >= 70 && top(c)).sort((a, b) => b.w * b.score - a.w * a.score).slice(0, 3);
     const weak = cats.filter(c => c.score < 50 && low(c)).sort((a, b) => b.w * (100 - b.score) - a.w * (100 - a.score)).slice(0, 3);
     if (strong.length) out.push('In its favor: ' + joinAnd(strong.map(c => line(c, top(c)))) + '.');
     if (weak.length) out.push('Watch-outs: ' + joinAnd(weak.map(c => line(c, low(c)))) + '.');
-    const middling = cats.filter(c => c.score >= 50 && c.score < 70 && low(c)).sort((a, b) => b.w - a.w).slice(0, 1);
-    if (!weak.length && middling.length) out.push('Middling: ' + line(middling[0], low(middling[0])) + '.');
+    const middling = cats.filter(c => c.score >= 50 && c.score < 70 && soso(c)).sort((a, b) => b.w - a.w).slice(0, 1);
+    if (!weak.length && middling.length) out.push('Middling: ' + line(middling[0], soso(middling[0])) + '.');
     // A weak factor inside an otherwise sound criterion (a floodplain, say) is still worth a line.
     const also = res.criteria.filter(f => f.status === 'ok' && f.w > 0 && f.score < 35 && f.fact && f.id !== 'zoning' && !said.has(f.id))
       .map(f => ({ f, cat: res.categories.find(c => c.id === f.cat) })).filter(x => x.cat.w > 0)
@@ -1008,6 +1081,11 @@ node["highway"="motorway_junction"](around:${r.junctionsM},${lat},${lon});out ta
     notify(r, 'forgotten');
   }
   function forgetPin(id) { for (const r of Array.from(runs.values())) if (r.pinId === id) drop(r); }
+  /** Stops following a run; one still loading that nobody else follows is stopped, so it does not hold up the next. */
+  function release(r, fn) {
+    r.listeners.delete(fn);
+    if (!r.listeners.size && SOURCES.some(k => r.status[k] === 'loading')) drop(r);
+  }
   const peek = pin => runs.get(runKey(pin)) || null;
   const forgetRun = pin => { const r = peek(pin); if (r) drop(r); };
   const pinLabel = run => { const p = WAMAP.pins && WAMAP.pins.get(run.pinId); return (p && p.label) || 'Dropped pin'; };
@@ -1027,7 +1105,7 @@ node["highway"="motorway_junction"](around:${r.junctionsM},${lat},${lon});out ta
     const coords = U.el('div', { class: 'se-coords' });
     const closeBtn = U.el('button', { class: 'icon-btn se-close', type: 'button', 'aria-label': 'Close the site evaluation', text: '✕' });
     const profileSel = U.el('select', { class: 'input small se-profile', 'aria-label': 'Use type' }, S.profiles.map(p => U.el('option', { value: p.id, text: p.label })));
-    const sqftIn = U.el('input', { class: 'input small se-sqft', type: 'number', min: '1000', max: '500000', step: '500', 'aria-label': 'Building size in square feet' });
+    const sqftIn = U.el('input', { class: 'input small se-sqft', type: 'number', min: String(SQFT_MIN), max: String(SQFT_MAX), step: '500', 'aria-label': 'Building size in square feet' });
     const showMap = U.el('input', { type: 'checkbox', id: 'se-show-map' });
     showMap.checked = true;
     const scoreNum = U.el('div', { class: 'se-num' });
@@ -1086,23 +1164,26 @@ node["highway"="motorway_junction"](around:${r.junctionsM},${lat},${lon});out ta
     profileSel.addEventListener('change', () => setPrefs({ profile: profileSel.value }));
     const applySqft = () => {
       const v = Math.round(+sqftIn.value);
-      if (v >= 1000 && v <= 500000 && v !== prefs.sqft) setPrefs({ sqft: v });
+      if (okSqft(v) && v !== prefs.sqft) setPrefs({ sqft: v });
     };
     sqftIn.addEventListener('input', U.debounce(applySqft, 300));
-    sqftIn.addEventListener('change', applySqft);
-    const applyWeights = () => {
-      const w = {};
+    sqftIn.addEventListener('change', () => { applySqft(); if (!okSqft(Math.round(+sqftIn.value))) sqftIn.value = String(prefs.sqft); });
+    const okWeight = v => v !== '' && +v >= 0 && +v <= 100;
+    // While typing, only a complete set applies; on change, a value out of range goes back to what applies.
+    const applyWeights = commit => {
+      const cur = weightsFor(prefs.profile), w = {};
       for (const k of CAT_IDS) {
-        const v = +weightInputs[k].value;
-        if (weightInputs[k].value === '' || !(v >= 0 && v <= 100)) return;
-        w[k] = Math.round(v);
+        if (okWeight(weightInputs[k].value)) w[k] = Math.round(+weightInputs[k].value);
+        else if (commit) w[k] = cur[k];
+        else return;
       }
-      if (!CAT_IDS.some(k => w[k] > 0)) return;
-      setWeights(prefs.profile, w);
+      if (!CAT_IDS.some(k => w[k] > 0)) { if (commit) syncControls(); return; }
+      if (CAT_IDS.some(k => w[k] !== cur[k])) setWeights(prefs.profile, w);
+      if (commit) for (const k of CAT_IDS) if (!okWeight(weightInputs[k].value)) weightInputs[k].value = String(w[k]);
     };
     for (const k of CAT_IDS) {
-      weightInputs[k].addEventListener('input', U.debounce(applyWeights, 250));
-      weightInputs[k].addEventListener('change', applyWeights);
+      weightInputs[k].addEventListener('input', U.debounce(() => applyWeights(false), 250));
+      weightInputs[k].addEventListener('change', () => applyWeights(true));
     }
     weightsReset.addEventListener('click', () => { setWeights(prefs.profile, null); syncControls(); });
     changeListeners.push(() => { syncControls(); if (run) { render(); drawOverlay(); } });
@@ -1123,38 +1204,42 @@ node["highway"="motorway_junction"](around:${r.junctionsM},${lat},${lon});out ta
       const pin = WAMAP.pins && WAMAP.pins.get(pinId);
       if (!pin) return;
       const r = gather(pin, force);
-      if (run !== r) { if (run) run.listeners.delete(onRun); run = r; r.listeners.add(onRun); }
-      show();
+      const moved = !run || run.pinId !== pinId;
+      if (run !== r) { const prev = run; run = r; r.listeners.add(onRun); if (prev) release(prev, onRun); }
+      show(moved);
       render();
       drawOverlay();
     }
     let raf = 0;
     function scheduleRender() { if (!raf) raf = requestAnimationFrame(() => { raf = 0; render(); }); }
 
-    function show() {
+    function show(reveal) {
       const wasHidden = panel.style.display === 'none';
       panel.style.display = '';
       wrap.classList.add('se-open');
       if (window.innerWidth < 900) { const sb = document.getElementById('sidebar'); if (sb) sb.classList.remove('open'); }
-      if (wasHidden && run) keepPinVisible();
+      if ((wasHidden || reveal) && run) keepPinVisible();
     }
     /** Pans the map so the pin is not hidden behind the panel. */
     function keepPinVisible() {
       const size = map.getSize(), p = map.latLngToContainerPoint([run.lat, run.lon]);
       const narrow = window.innerWidth < 900;
-      const free = narrow ? { x0: 0, x1: size.x, y0: 0, y1: size.y - panel.offsetHeight } : { x0: 0, x1: size.x - panel.offsetWidth - 20, y0: 0, y1: size.y };
+      // On a phone the sheet grows to 72% of the screen as results arrive: keep the pin above that.
+      const sheet = narrow ? Math.min(size.y - 80, Math.max(panel.offsetHeight, Math.round(window.innerHeight * 0.72))) : 0;
+      const free = narrow ? { x0: 0, x1: size.x, y0: 0, y1: size.y - sheet } : { x0: 0, x1: size.x - panel.offsetWidth - 20, y0: 0, y1: size.y };
       const cx = (free.x0 + free.x1) / 2, cy = (free.y0 + free.y1) / 2;
       const inside = p.x > free.x0 + 40 && p.x < free.x1 - 40 && p.y > free.y0 + 40 && p.y < free.y1 - 40;
       if (!inside) map.panBy([p.x - cx, p.y - cy], { animate: false });
     }
     function close() {
-      // The run carries on in the background: the ranking can use it.
-      if (run) run.listeners.delete(onRun);
+      // A finished run stays cached for the ranking; one still loading that nothing else follows is stopped.
+      const prev = run;
+      run = null;
+      if (prev) release(prev, onRun);
       panel.style.display = 'none';
       wrap.classList.remove('se-open');
       overlay.clearLayers();
       if (map.hasLayer(overlay)) map.removeLayer(overlay);
-      run = null;
     }
 
     // ---- rendering --------------------------------------------------------------
@@ -1256,7 +1341,7 @@ node["highway"="motorway_junction"](around:${r.junctionsM},${lat},${lon});out ta
           for (const t of c.details || []) lines.push('    - ' + t);
         }
       }
-      lines.push('', 'Sources: Washington State Zoning Atlas (WA Commerce), WA statewide parcels, WSDOT functional class and traffic counts, USGS 3DEP, FEMA NFHL, WSDOT GTFS, ACS 5-year (U.S. Census Bureau), OFM small-area estimates and county projections, NCHS NAMCS visit rates, Valhalla/OpenStreetMap, facility registries. Screening estimate; verify with the jurisdiction.');
+      lines.push('', 'Sources: Washington State Zoning Atlas (WA Commerce), WA statewide parcels, WSDOT functional class and traffic counts, USGS 3DEP, FEMA NFHL, WSDOT GTFS, ACS 5-year and LEHD LODES (U.S. Census Bureau), OFM small-area estimates and county projections, NCHS NAMCS visit rates, Valhalla/OpenStreetMap, facility registries. Screening estimate; verify with the jurisdiction.');
       return lines.join('\n');
     }
     copyBtn.addEventListener('click', () => copyText(writeupEl.textContent, copyBtn));
@@ -1297,7 +1382,9 @@ node["highway"="motorway_junction"](around:${r.junctionsM},${lat},${lon});out ta
   };
 
   async function copyText(text, btn) {
-    const old = btn.textContent;
+    // The label is kept once, so quick repeat clicks still restore it.
+    const old = btn.dataset.label || (btn.dataset.label = btn.textContent);
+    clearTimeout(btn._copyTimer);
     try { await navigator.clipboard.writeText(text); btn.textContent = '✓ Copied'; }
     catch (e) {
       const ta = U.el('textarea', { class: 'se-copy-fallback' });
@@ -1307,11 +1394,11 @@ node["highway"="motorway_junction"](around:${r.junctionsM},${lat},${lon});out ta
       ta.remove();
       btn.textContent = ok ? '✓ Copied' : 'Copy failed';
     }
-    setTimeout(() => { btn.textContent = old; }, 1600);
+    btn._copyTimer = setTimeout(() => { btn.textContent = old; }, 1600);
   }
 
   // Shared with the ranking (layers/siteranking.js) and the smoke test.
-  WAMAP.siteData = { gather, peek, forgetRun, evaluate, writeUp, weightsFor, setWeights, customWeights, gradeOf, prefs, setPrefs, pinLabel, copyText,
+  WAMAP.siteData = { gather, peek, forgetRun, release, evaluate, catchmentFor, okSqft, SQFT_MIN, SQFT_MAX, writeUp, weightsFor, setWeights, customWeights, gradeOf, prefs, setPrefs, pinLabel, copyText,
     onChange(fn) { changeListeners.push(fn); } };
   WAMAP.siteEvalInternals = { ramp, geomDistM, ringStats, evaluate, writeUp, valueAt, countyOutlook };
 })();

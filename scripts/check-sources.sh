@@ -18,6 +18,9 @@ probe() { # name method url [data] [content-type]
   if [ "$method" = POST ]; then
     code=$(curl -sS -m 40 -o "$body" -D "$hdr" -w '%{http_code}' -A "$UA" -H "Origin: $ORIGIN" \
            -H "Content-Type: $ctype" --data "$data" "$url" 2>/dev/null || echo 000)
+  elif [ "$method" = HEAD ]; then # a large file: headers only
+    code=$(curl -sS -m 40 -I -L -o "$body" -D "$hdr" -w '%{http_code}' -A "$UA" -H "Origin: $ORIGIN" \
+           "$url" 2>/dev/null || echo 000)
   elif [ "$method" = OPTIONS ]; then
     code=$(curl -sS -m 40 -o "$body" -D "$hdr" -w '%{http_code}' -A "$UA" -X OPTIONS -H "Origin: $ORIGIN" \
            -H "Access-Control-Request-Method: POST" -H "Access-Control-Request-Headers: content-type,x-client-id" \
@@ -76,6 +79,10 @@ probe "census ACS summary file dir" GET "https://www2.census.gov/programs-survey
 probe "census cartographic boundary files" GET "https://www2.census.gov/geo/tiger/GENZ2025/shp/"
 probe "census gazetteer files" GET "https://www2.census.gov/geo/docs/maps-data/data/gazetteer/"
 probe "census ACS variable metadata (B27010)" GET "https://api.census.gov/data/2024/acs/acs5/groups/B27010.json"
+probe "census ACS variable metadata (B01001)" GET "https://api.census.gov/data/2024/acs/acs5/groups/B01001.json"
+probe "OFM small area estimates (tracts)" HEAD "https://ofm.wa.gov/wp-content/uploads/sites/default/files/public/dataresearch/pop/smallarea/data/xlsx/saep_tract20.xlsx"
+probe "OFM GMA county projections (2022)" HEAD "https://ofm.wa.gov/wp-content/uploads/sites/default/files/public/dataresearch/pop/GMA/projections2022/gma_2022_5yr.xlsx"
+probe "LEHD LODES 8 workplace files (WA)" GET "https://lehd.ces.census.gov/data/lodes/LODES8/wa/wac/"
 probe "tigerweb ACS2024 Tracts (boundary fallback)" GET "https://tigerweb.geo.census.gov/arcgis/rest/services/Generalized_ACS2024/Tracts_Blocks/MapServer?f=json"
 probe "WA DOH hospitals" GET "https://services8.arcgis.com/rGGrs6HCnw87OFOT/arcgis/rest/services/Hospitals/FeatureServer/0?f=json"
 probe "WA DOH HELMS facilities" GET "https://services8.arcgis.com/rGGrs6HCnw87OFOT/arcgis/rest/services/Facility_HELMS_Report_DEC2025/FeatureServer/0?f=json"

@@ -42,6 +42,31 @@ export async function fetchRetry(url, init = {}, { retries = 3, timeoutMs = 9000
   throw new Error(`${new URL(url).host}: ${lastErr && lastErr.message}`);
 }
 
+/**
+ * Download a whole file as a Buffer. The deadline covers the body too, and a
+ * transfer dropped midway is retried. A 4xx answer returns { status, buf: null }
+ * for the caller to judge; 429, 5xx and network failures throw after retries.
+ */
+export async function fetchBuffer(url, { retries = 2, timeoutMs = 300000 } = {}) {
+  let lastErr;
+  for (let i = 0; i <= retries; i++) {
+    const ctl = new AbortController();
+    const t = setTimeout(() => ctl.abort(), timeoutMs);
+    try {
+      const res = await fetch(url, { signal: ctl.signal, headers: { 'User-Agent': UA } });
+      if (res.status === 429 || res.status >= 500) throw new Error(`HTTP ${res.status}`);
+      if (!res.ok) return { status: res.status, buf: null };
+      return { status: res.status, buf: Buffer.from(await res.arrayBuffer()) };
+    } catch (err) {
+      lastErr = err;
+      if (i < retries) await sleep(2000 * 2 ** i);
+    } finally {
+      clearTimeout(t);
+    }
+  }
+  throw new Error(`${new URL(url).host}: ${lastErr && lastErr.message}`);
+}
+
 export async function fetchText(url, init, opts) {
   const res = await fetchRetry(url, init, opts);
   if (!res.ok) throw new Error(`HTTP ${res.status} from ${new URL(url).host}`);
@@ -231,9 +256,8 @@ export async function readXlsx(url) {
   const { execFileSync } = await import('node:child_process');
   const { writeFile, mkdtemp } = await import('node:fs/promises');
   const { tmpdir } = await import('node:os');
-  const res = await fetchRetry(url, {}, { retries: 2, timeoutMs: 300000 });
-  if (!res.ok) throw new Error(`HTTP ${res.status} for ${url}`);
-  const buf = Buffer.from(await res.arrayBuffer());
+  const { status, buf } = await fetchBuffer(url);
+  if (!buf) throw new Error(`HTTP ${status} for ${url}`);
   // A missing file can come back as an HTML page with status 200.
   if (buf.length < 4 || buf.readUInt32LE(0) !== 0x04034b50) throw new Error(`${url} is not an .xlsx workbook`);
   const d = await mkdtemp(`${tmpdir()}/xlsx-`);

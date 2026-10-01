@@ -16,7 +16,54 @@
   const loading = r => SOURCES.some(k => r.status[k] === 'loading');
   const gradeLevel = n => (n >= 4 ? 'good' : n === 3 ? 'fair' : 'poor');
   const int = v => Math.round(v).toLocaleString('en-US');
-  const RANK_LABEL = ['Most favorable option', 'Second most favorable option'];
+  const usd = v => '$' + (v >= 995000 ? (v / 1e6).toFixed(v >= 9.95e6 ? 0 : 1) + 'M' : v >= 1000 ? Math.round(v / 1000) + 'k' : Math.round(v));
+  const RANK_LABEL = ['Top-ranked site', 'Second-ranked site'];
+  /** "5 very strong 85+, 4 strong 70-84, …" from CONFIG.SITE_EVAL.scale. */
+  const scaleText = () => S.scale.map(([min, n, label], i) =>
+    `${n} ${label.toLowerCase()} ${i === 0 ? min + '+' : min === 0 ? 'below ' + S.scale[i - 1][0] : min + '-' + (S.scale[i - 1][0] - 1)}`).join(', ');
+
+  /**
+   * Sorts rows ({ i, res, busy }) best first and gives each a rank and a
+   * label. Zoning that rules out medical use sorts last; equal scores share a
+   * rank and a label, since the order between them means nothing.
+   */
+  function rankRows(rows) {
+    rows.sort((a, b) => {
+      const ao = a.res && a.res.overall != null, bo = b.res && b.res.overall != null;
+      if (ao !== bo) return ao ? -1 : 1;
+      if (!ao) return a.i - b.i;
+      if (a.res.gated !== b.res.gated) return a.res.gated ? 1 : -1;
+      return b.res.overall - a.res.overall || b.res.stars - a.res.stars || a.i - b.i;
+    });
+    let n = 0, prev = null;
+    rows.forEach((r, i) => {
+      const res = r.res;
+      if (!res || res.overall == null) { r.rankLabel = r.busy ? 'Scoring…' : 'Not scored'; return; }
+      const tie = prev && prev.res.gated === res.gated && prev.res.overall === res.overall && prev.res.stars === res.stars;
+      r.rank = tie ? prev.rank : i + 1;
+      r.tied = tie;
+      if (tie) prev.tied = true;
+      if (res.gated) {
+        // Office uses not permitted, or a zone class (residential, open space) whose uses are not recorded.
+        const z = res.criteria.find(c => c.id === 'zoning');
+        r.rankLabel = z && z.basis === 'office' ? 'Zoning barrier: offices not permitted' : 'Zoning likely a barrier (uses not recorded for this zone)';
+      } else {
+        if (!tie) r.group = n++;
+        else r.group = prev.group;
+        r.rankLabel = rows.length === 1 ? 'Only site so far' : RANK_LABEL[r.group] || 'Lower-ranked site';
+      }
+      prev = r;
+    });
+    for (const r of rows) {
+      if (!r.res || r.res.overall == null) continue;
+      if (r.tied) r.rankLabel = 'Tied: ' + r.rankLabel.charAt(0).toLowerCase() + r.rankLabel.slice(1);
+      const z = r.res.criteria.find(c => c.id === 'zoning');
+      r.zoningUnchecked = !!z && (z.status === 'error' || z.status === 'na');
+      if (r.zoningUnchecked) r.rankLabel += ' · zoning not verified';
+      if (r.res.coverage < 60) r.rankLabel += ' (partial data)';
+    }
+    return rows;
+  }
 
   WAMAP.createSiteRanking = function (opts) {
     const { map } = opts;
@@ -27,7 +74,7 @@
     modal.style.display = 'none';
     const closeBtn = U.el('button', { class: 'icon-btn', type: 'button', 'aria-label': 'Close the site ranking', text: '✕' });
     const profileSel = U.el('select', { class: 'input small rank-profile', 'aria-label': 'Use type' }, S.profiles.map(p => U.el('option', { value: p.id, text: p.label })));
-    const sqftIn = U.el('input', { class: 'input small rank-sqft', type: 'number', min: '1000', max: '500000', step: '500', 'aria-label': 'Building size in square feet' });
+    const sqftIn = U.el('input', { class: 'input small rank-sqft', type: 'number', min: String(SD.SQFT_MIN), max: String(SD.SQFT_MAX), step: '500', 'aria-label': 'Building size in square feet' });
     const resetBtn = U.el('button', { class: 'btn mini ghost', type: 'button', text: 'Reset weights' });
     const rescoreBtn = U.el('button', { class: 'btn mini ghost', type: 'button', text: '↻ Re-score', title: 'Fetch every source again for every site' });
     const copyBtn = U.el('button', { class: 'btn mini', type: 'button', text: '📋 Copy as text' });
@@ -48,7 +95,7 @@
     document.body.appendChild(modal);
 
     // ---- pins and runs -------------------------------------------------------
-    const hooked = new WeakSet();
+    const hooked = new Set();   // runs this ranking follows while it is open
     const allPins = () => (WAMAP.pins && WAMAP.pins.list ? WAMAP.pins.list() : []);
     const sites = () => allPins().slice(0, S.rankMax);
     const peek = p => SD.peek(p);
@@ -82,34 +129,62 @@
         const res = run ? SD.evaluate(run, profile, SD.prefs.sqft, W) : null;
         return { pin, i, run, res, label: SD.pinLabel({ pinId: pin.id }), busy: !run || loading(run) };
       });
-      rows.sort((a, b) => {
-        const ao = a.res && a.res.overall != null, bo = b.res && b.res.overall != null;
-        if (ao !== bo) return ao ? -1 : 1;
-        if (!ao) return a.i - b.i;
-        if (a.res.gated !== b.res.gated) return a.res.gated ? 1 : -1;
-        return b.res.overall - a.res.overall || b.res.stars - a.res.stars || a.i - b.i;
-      });
-      let n = 0;
+      rankRows(rows);
+      // Not weighted, but part of the choice: how much of each site's catchment
+      // another pin already draws on (cannibalization, if one is an existing
+      // site), and what the land is assessed at (a rough guide to cost).
       for (const r of rows) {
-        if (!r.res || r.res.overall == null) r.rankLabel = r.busy ? 'Scoring…' : 'Not scored';
-        else if (r.res.gated) r.rankLabel = 'Zoning barrier: medical use not permitted';
-        else r.rankLabel = rows.length === 1 ? 'Only site so far' : RANK_LABEL[n] || 'Less favorable option';
-        if (r.res && r.res.overall != null) { r.rank = rows.indexOf(r) + 1; if (!r.res.gated) n++; }
-        if (r.res && r.res.overall != null && r.res.coverage < 60) r.rankLabel += ' (partial data)';
+        const c = r.run && r.run.data.catchment ? SD.catchmentFor(r.run.data, profile) : null;
+        r.members = c && c.agg.members && c.agg.pop > 0 ? c.agg : null;
+        const par = r.run && r.run.data.parcel;
+        r.land = par && !par.none && par.acres > 0 && par.props.VALUE_LAND > 0
+          ? { acres: par.acres, land: par.props.VALUE_LAND, total: par.props.VALUE_LAND + (par.props.VALUE_BLDG > 0 ? par.props.VALUE_BLDG : 0) } : null;
+      }
+      for (const r of rows) {
+        r.overlap = null;
+        if (!r.members) continue;
+        for (const o of rows) {
+          if (o === r || !o.members) continue;
+          let shared = 0;
+          for (const g in r.members.members) if (g in o.members.members) shared += r.members.members[g];
+          const share = shared / r.members.pop;
+          if (!r.overlap || share > r.overlap.share) r.overlap = { share, other: o };
+        }
       }
       return { profile, W, rows, busy: rows.some(r => r.busy) };
     }
     /** The two facts shown for a criterion: its heaviest factor, then a red flag if there is one, else the next heaviest. */
     function briefs(cat) {
       const fs = cat.factors.filter(f => f.status === 'ok' && f.brief).sort((a, b) => b.w - a.w);
+      // Zoning that could not be checked is said first: the score leaves it out.
+      const z = cat.factors.find(f => f.id === 'zoning' && (f.status === 'error' || f.status === 'na'));
+      if (z) fs.unshift({ id: 'zoning', label: 'Zoning', brief: 'zoning not verified', score: 0, w: Infinity });
       if (!fs.length) return [];
       const flag = fs.slice(1).find(f => f.score < 35);
       return [fs[0], flag || fs[1]].filter(Boolean);
     }
 
-    let last = null;
+    const overlapText = r => (!r.overlap ? (r.busy ? '…' : '—') : r.overlap.share < 0.005 ? 'No shared residents'
+      : `${Math.round(r.overlap.share * 100)}% of residents shared with ${r.overlap.other.rank ? '#' + r.overlap.other.rank : r.overlap.other.label}`);
+    const landText = r => (r.land ? `${usd(r.land.land / r.land.acres)} per acre` : r.busy ? '…' : 'not on record');
+    const landSub = r => (r.land ? `land ${usd(r.land.land)} · total ${usd(r.land.total)} (${r.land.acres.toFixed(r.land.acres < 10 ? 1 : 0)} ac)` : '');
+    let last = null, rendering = false, deferred = false;
+    /** The weight input being edited, if any: { cat, committed } (committed when it shows the stored weight). */
+    function editing() {
+      const el = document.activeElement;
+      if (!el || !host.contains(el) || !el.classList.contains('rank-win')) return null;
+      return { cat: el.dataset.cat, committed: Number(el.value) === SD.weightsFor(SD.prefs.profile)[el.dataset.cat] };
+    }
     function render() {
       if (!isOpen()) return;
+      if (rendering) { scheduleRender(); return; }
+      // Rebuilding the table would throw away a weight half typed: wait for it.
+      const ed = editing();
+      if (ed && !ed.committed) { deferred = true; return; }
+      rendering = true;
+      try { build(ed && ed.cat); } finally { rendering = false; }
+    }
+    function build(focusCat) {
       const out = compute();
       last = out;
       syncControls(out);
@@ -154,8 +229,16 @@
             U.el('div', { class: 'rank-bar' }, [U.el('span', { style: 'width:' + c.score + '%' })]),
             U.el('ul', { class: 'rank-briefs' }, briefs(c).map(f => U.el('li', { text: f.brief, title: f.label })))]));
         }
-        body.appendChild(U.el('tr', { class: cat.w === 0 ? 'rank-off' : '' }, cells));
+        body.appendChild(U.el('tr', { class: out.W[cat.id] === 0 ? 'rank-off' : '' }, cells));
       }
+      const info = (icon, label, about, cell) => U.el('tr', { class: 'rank-info' }, [
+        U.el('th', { class: 'rank-crit', scope: 'row' }, [U.el('span', { class: 'rank-ci', text: icon }), U.el('span', {}, [U.el('span', { class: 'rank-cl', text: label }), U.el('small', { text: about })])]),
+        U.el('td', { class: 'rank-w rank-nw', text: 'not weighted' })].concat(out.rows.map(cell)));
+      if (out.rows.length > 1) {
+        body.appendChild(info('🔁', 'Catchment overlap', 'Residents another pin also reaches', r => U.el('td', { class: 'rank-cell rank-icell' + (r.overlap && r.overlap.share >= 0.5 ? ' rank-flag' : ''), text: overlapText(r) })));
+      }
+      body.appendChild(info('🏷️', 'Assessed land value', 'County assessor; a rough guide to cost', r => U.el('td', { class: 'rank-cell rank-icell' }, [
+        U.el('div', { text: landText(r) }), r.land ? U.el('div', { class: 'rank-isub', text: landSub(r) }) : null])));
       const totalCells = [U.el('th', { class: 'rank-crit', scope: 'row', text: 'Overall score' }),
         U.el('td', { class: 'rank-w' + (wTotal !== 100 ? ' rank-woff' : ''), text: wTotal + '%', title: wTotal !== 100 ? 'Weights are scaled to 100%' : '' })];
       for (const r of out.rows) {
@@ -171,8 +254,10 @@
       table.appendChild(body);
       host.innerHTML = '';
       host.appendChild(table);
-      note.textContent = 'Each criterion is rated 1-5 from the scores of the factors behind it (5 Excellent 85+, 4 Strong 70-84, 3 Average 50-69, 2 Below average 30-49, 1 Poor below 30); ' +
-        'the overall score is the weighted average of the criteria scores, out of 100. A site whose zoning rules out medical use is ranked after the others. ' +
+      if (focusCat) { const el = host.querySelector(`.rank-win[data-cat="${focusCat}"]`); if (el) el.focus(); } // keep the place of a keyboard edit
+      note.textContent = `Each criterion is rated 1-5 from the scores of the factors behind it (${scaleText()}); ` +
+        'the overall score is the weighted average of the criteria scores, out of 100, and equal scores share a rank. A site whose zoning rules out medical use is ranked after the others; one whose zoning could not be checked says so. ' +
+        'Catchment overlap is the share of a site\'s drive-time residents that another pin also reaches; where that pin is an existing site, a high share means the new one would draw on the same patients. Land value is the county assessor\'s, not a market price. ' +
         `Weights are ${SD.customWeights(out.profile) ? 'your own for this use type (kept in this browser)' : 'the defaults for this use type'}; edit them in the Weight column. Open a site for the evidence behind each rating. Screening estimates from public data.`;
     }
     let raf = 0;
@@ -184,33 +269,38 @@
       if (document.activeElement !== sqftIn) sqftIn.value = String(SD.prefs.sqft);
       resetBtn.disabled = !SD.customWeights(out.profile);
     }
-    function applyWeights() {
-      const w = {};
+    function applyWeights(e) {
+      const cur = SD.weightsFor(SD.prefs.profile), w = Object.assign({}, cur);
       for (const inp of host.querySelectorAll('.rank-win')) {
         const v = +inp.value;
-        if (inp.value === '' || !(v >= 0 && v <= 100)) return;
-        w[inp.dataset.cat] = Math.round(v);
+        if (inp.value !== '' && v >= 0 && v <= 100) w[inp.dataset.cat] = Math.round(v);
       }
-      if (!S.categories.every(c => c.id in w) || !S.categories.some(c => w[c.id] > 0)) return;
-      SD.setWeights(SD.prefs.profile, w);
+      // A value out of range, or weights that would all be zero, go back to what applies.
+      if (!S.categories.some(c => w[c.id] > 0)) Object.assign(w, cur);
+      for (const inp of host.querySelectorAll('.rank-win')) if (Number(inp.value) !== w[inp.dataset.cat] || inp.value === '') inp.value = String(w[inp.dataset.cat]);
+      if (S.categories.some(c => w[c.id] !== cur[c.id])) SD.setWeights(SD.prefs.profile, w);
+      else if (e) scheduleRender();
     }
     profileSel.addEventListener('change', () => SD.setPrefs({ profile: profileSel.value }));
-    const applySqft = () => { const v = Math.round(+sqftIn.value); if (v >= 1000 && v <= 500000 && v !== SD.prefs.sqft) SD.setPrefs({ sqft: v }); };
+    const applySqft = () => { const v = Math.round(+sqftIn.value); if (SD.okSqft(v) && v !== SD.prefs.sqft) SD.setPrefs({ sqft: v }); };
     sqftIn.addEventListener('input', U.debounce(applySqft, 300));
-    sqftIn.addEventListener('change', applySqft);
+    sqftIn.addEventListener('change', () => { applySqft(); if (!SD.okSqft(Math.round(+sqftIn.value))) sqftIn.value = String(SD.prefs.sqft); });
     resetBtn.addEventListener('click', () => SD.setWeights(SD.prefs.profile, null));
     rescoreBtn.addEventListener('click', () => {
       for (const p of sites()) SD.forgetRun(p);
       pump();
     });
-    SD.onChange(() => { if (isOpen()) render(); });
+    SD.onChange(() => { if (isOpen()) scheduleRender(); });
+    host.addEventListener('focusout', () => { if (deferred) { deferred = false; scheduleRender(); } });
 
     function openSite(id) {
+      // The panel takes the run over before the ranking lets go of it.
       const pin = WAMAP.pins.get(id);
+      if (pin) {
+        map.setView([pin.lat, pin.lon], Math.max(map.getZoom(), 15));
+        if (WAMAP.siteEval) WAMAP.siteEval.open(id);
+      }
       close();
-      if (!pin) return;
-      map.setView([pin.lat, pin.lon], Math.max(map.getZoom(), 15));
-      if (WAMAP.siteEval) WAMAP.siteEval.open(id);
     }
 
     // ---- export ---------------------------------------------------------------
@@ -227,8 +317,10 @@
           const facts = res.categories.flatMap(c => briefs(c).map(f => f.brief));
           if (facts.length) lines.push('   ' + facts.join('; '));
         }
+        const extra = [out.rows.length > 1 && r.overlap ? 'Catchment overlap: ' + overlapText(r) : null, r.land ? `Assessed land: ${landText(r)}, ${landSub(r)}` : null].filter(Boolean);
+        if (extra.length) lines.push('   ' + extra.join(' · '));
       }
-      lines.push('', 'Criteria rated 1-5 (5 Excellent 85+, 4 Strong 70-84, 3 Average 50-69, 2 Below average 30-49, 1 Poor <30); overall = weighted average of criteria scores out of 100. Screening estimates from public data (Washington Explorer).');
+      lines.push('', `Criteria rated 1-5 (${scaleText()}); overall = weighted average of criteria scores out of 100. Screening estimates from public data (Washington Explorer).`);
       return lines.join('\n');
     }
     function asCSV() {
@@ -240,13 +332,16 @@
           const c = r.res && r.res.categories.find(x => x.id === cat.id);
           return c && c.grade ? `${c.grade.n} ${c.grade.label} (${c.score})` : '';
         })));
-        for (const f of S.criteria.filter(x => x.cat === cat.id)) {
+        const counted = S.criteria.filter(x => x.cat === cat.id && (last.profile.factorWeights && last.profile.factorWeights[x.id] != null ? last.profile.factorWeights[x.id] : x.w) > 0);
+        for (const f of counted) {
           rows.push(['  ' + f.label, ''].concat(last.rows.map(r => {
             const x = r.res && r.res.criteria.find(y => y.id === f.id);
             return x && x.status === 'ok' ? `${x.score}${x.brief ? ' - ' + x.brief : ''}` : '';
           })));
         }
       }
+      rows.push(['Catchment overlap (share of residents another pin reaches)', 'not weighted'].concat(last.rows.map(r => (r.overlap ? `${Math.round(r.overlap.share * 100)}%${r.overlap.share >= 0.005 ? ' with ' + (r.overlap.other.rank ? '#' + r.overlap.other.rank : r.overlap.other.label) : ''}` : ''))));
+      rows.push(['Assessed land value per acre ($)', 'not weighted'].concat(last.rows.map(r => (r.land ? Math.round(r.land.land / r.land.acres) : ''))));
       rows.push(['Overall score (of 100)', S.categories.reduce((t, c) => t + last.W[c.id], 0)].concat(last.rows.map(r => (r.res && r.res.overall != null ? r.res.overall : ''))));
       rows.push(['Rating', ''].concat(last.rows.map(r => (r.res && r.res.rating) || '')));
       rows.push(['Rank', ''].concat(last.rows.map(r => `${r.rank || ''} ${r.rankLabel}`.trim())));
@@ -262,13 +357,22 @@
 
     // ---- open / close -----------------------------------------------------------
     function isOpen() { return modal.style.display !== 'none'; }
+    let opener = null;
     function open() {
+      if (!isOpen()) opener = document.activeElement;
       modal.style.display = 'flex';
       pump();
       render();
       closeBtn.focus();
     }
-    function close() { modal.style.display = 'none'; }
+    function close() {
+      modal.style.display = 'none';
+      // Let go of the runs: one still loading that nothing else follows is stopped (reopening resumes it).
+      for (const r of hooked) SD.release(r, onRun);
+      hooked.clear();
+      if (opener && document.body.contains(opener) && opener.focus) opener.focus();
+      opener = null;
+    }
     closeBtn.addEventListener('click', close);
     modal.addEventListener('click', e => { if (e.target === modal) close(); });
     document.addEventListener('keydown', e => { if (e.key === 'Escape' && isOpen()) close(); });
@@ -281,10 +385,12 @@
       result() {
         const out = compute();
         return { profile: out.profile.id, busy: out.busy, weights: out.W, rows: out.rows.map(r => ({ pinId: r.pin.id, label: r.label, rank: r.rank || null, rankLabel: r.rankLabel,
-          overall: r.res ? r.res.overall : null, rating: r.res ? r.res.rating : null, gated: r.res ? r.res.gated : null,
+          overall: r.res ? r.res.overall : null, rating: r.res ? r.res.rating : null, gated: r.res ? r.res.gated : null, tied: !!r.tied, zoningUnchecked: !!r.zoningUnchecked,
+          overlap: r.overlap ? { share: r.overlap.share, with: r.overlap.other.pin.id } : null, landPerAcre: r.land ? r.land.land / r.land.acres : null,
           categories: r.res ? r.res.categories.map(c => ({ id: c.id, w: c.w, score: c.score, grade: c.grade && c.grade.n })) : [] })) };
       },
       text: asText, csv: asCSV
     };
   };
+  WAMAP.siteRankingInternals = { rankRows };
 })();

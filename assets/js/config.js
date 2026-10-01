@@ -270,6 +270,13 @@
 
   // Demographic metrics. `value(d)` receives the derived record built in
   // censusStore; land area (sq meters) is merged from boundary attributes.
+  /** Office visits the age mix would make at national rates by age, relative to the U.S. average (SITE_EVAL.visitRates). */
+  function careUseIndex(d) {
+    const V = SITE_EVAL.visitRates, keys = ['age0_14', 'age15_24', 'age25_44', 'age45_64', 'age65_74', 'age75p'];
+    if (keys.some(k => d[k] == null)) return null;
+    const total = keys.reduce((t, k) => t + d[k], 0);
+    return total > 0 ? keys.reduce((t, k) => t + d[k] / total * V[k], 0) / V.all : null;
+  }
   const DEMO_METRICS = [
     { id: 'density', label: 'Population density', unit: '/sq mi', fmt: 'int',
       value: d => (d.pop != null && d.aland > 0 ? d.pop / (d.aland * SQMI_PER_SQM) : null),
@@ -280,6 +287,12 @@
       value: d => d.medInc, desc: 'Median household income in the past 12 months (ACS table B19013).' },
     { id: 'age', label: 'Median age', unit: 'yrs', fmt: 'num1',
       value: d => d.medAge, desc: 'Median age (ACS table B01002).' },
+    { id: 'age65', label: 'Share 65 and over', unit: '%', fmt: 'pct1',
+      value: d => (d.age65_74 != null && d.age75p != null ? d.age65_74 + d.age75p : null), desc: 'Share of residents 65 and over (ACS table B01001).' },
+    { id: 'age0_14', label: 'Share under 15', unit: '%', fmt: 'pct1',
+      value: d => (d.age0_14 != null ? d.age0_14 : null), desc: 'Share of residents under 15 (ACS table B01001).' },
+    { id: 'careUse', label: 'Care-use index (age mix)', unit: '', fmt: 'num2', value: d => careUseIndex(d),
+      desc: 'Physician office visits the age mix would make at national visit rates by age, relative to the U.S. average (1.00): above 1 means an older, heavier-using population (NAMCS 2019, NCHS; ages from ACS table B01001).' },
     { id: 'edu', label: "Bachelor's degree or higher", unit: '%', fmt: 'pct1',
       value: d => d.pctBach, desc: "Share of population 25+ with a bachelor's degree or higher (ACS table B15003)." },
     { id: 'homeValue', label: 'Median home value', unit: '$', fmt: 'money',
@@ -743,20 +756,21 @@
   const SITE_EVAL = {
     defaultSqft: 10000,
     growthData: 'data/growth.json',
+    jobsData: 'data/jobs.json',
     // The six weighted criteria of a healthcare site ranking. Each is scored
     // 0-100 from the factors under it and shown on a 1-5 scale; the use
     // type's weights (editable in the panel) combine them into a score out
     // of 100.
     categories: [
-      { id: 'demand', label: 'Market demand & growth', short: 'Demand', icon: '👥', about: 'Patients the site can draw now and as the area grows' },
-      { id: 'access', label: 'Access & connectivity', short: 'Access', icon: '🛣️', about: 'How easily patients and staff reach the site' },
-      { id: 'competition', label: 'Competitive positioning', short: 'Competition', icon: '📊', about: 'How crowded the market is and what nearby care adds' },
-      { id: 'financial', label: 'Financial viability', short: 'Financial', icon: '💳', about: 'Insurance coverage, incomes and the local economy' },
-      { id: 'feasibility', label: 'Site feasibility', short: 'Feasibility', icon: '🏗️', about: 'Zoning, parcel and parking, terrain and flood risk' },
-      { id: 'visibility', label: 'Visibility & long-term potential', short: 'Visibility', icon: '👁️', about: 'Drive-by exposure, the retail corridor and growth nearby' }
+      { id: 'demand', label: 'Demand & growth', short: 'Demand', icon: '👥', about: 'Patients the site can draw now and as the area grows' },
+      { id: 'access', label: 'Access & transit', short: 'Access', icon: '🛣️', about: 'How easily patients and staff reach the site' },
+      { id: 'competition', label: 'Competition & care nearby', short: 'Competition', icon: '📊', about: 'How crowded the market is and what nearby care adds' },
+      { id: 'financial', label: 'Payer & economic strength', short: 'Economics', icon: '💳', about: 'Insurance coverage, incomes and the local economy' },
+      { id: 'feasibility', label: 'Zoning & site readiness', short: 'Site', icon: '🏗️', about: 'Zoning, parcel and parking, terrain and flood risk' },
+      { id: 'visibility', label: 'Visibility & outlook', short: 'Visibility', icon: '👁️', about: 'Drive-by exposure, the retail corridor and growth nearby' }
     ],
     // 1-5 scale for each criterion and the overall score.
-    scale: [[85, 5, 'Excellent'], [70, 4, 'Strong'], [50, 3, 'Average'], [30, 2, 'Below average'], [0, 1, 'Poor']],
+    scale: [[85, 5, 'Very strong'], [70, 4, 'Strong'], [50, 3, 'Fair'], [30, 2, 'Weak'], [0, 1, 'Very weak']],
     profiles: [
       { id: 'primary', label: 'Primary care clinic', minutes: 10, parkingPer1000: 5,
         weights: { demand: 30, access: 20, competition: 20, financial: 15, feasibility: 10, visibility: 5 } },
@@ -768,7 +782,14 @@
         factorWeights: { access: 80, transit: 20 } },
       { id: 'chc', label: 'Community health center (FQHC)', minutes: 15, parkingPer1000: 4,
         weights: { demand: 30, access: 25, competition: 15, financial: 15, feasibility: 10, visibility: 5 },
-        factorWeights: { access: 50, transit: 50, market: 0 } }
+        factorWeights: { access: 50, transit: 50, market: 0, employer: 0 } },
+      // A new hospital: a 30-minute service area, a campus of 15 acres or more
+      // (often assembled from several parcels), multi-story with its own
+      // parking; other hospitals nearby are competitors, not an advantage.
+      { id: 'hospital', label: 'Hospital or inpatient campus', noun: 'hospital campus', minutes: 30, parkingPer1000: 2,
+        defaultSqft: 200000, stories: 4, minAcres: 15, campus: true,
+        weights: { demand: 30, access: 20, competition: 20, financial: 15, feasibility: 10, visibility: 5 },
+        factorWeights: { health: 0 } }
     ],
     // The factors behind each criterion, each scored 0-100; `w` is its share
     // of its criterion (a use type can override it in factorWeights).
@@ -779,8 +800,9 @@
       { id: 'transit', cat: 'access', w: 30, label: 'Public transit', icon: '🚌' },
       { id: 'competition', cat: 'competition', w: 65, label: 'Competition', icon: '📊' },
       { id: 'health', cat: 'competition', w: 35, label: 'Hospital & care adjacency', icon: '🏥' },
-      { id: 'payer', cat: 'financial', w: 80, label: 'Payer mix & income', icon: '💳' },
-      { id: 'market', cat: 'financial', w: 20, label: 'Labor market', icon: '💼' },
+      { id: 'payer', cat: 'financial', w: 70, label: 'Payer mix & income', icon: '💳' },
+      { id: 'market', cat: 'financial', w: 15, label: 'Labor market', icon: '💼' },
+      { id: 'employer', cat: 'financial', w: 15, label: 'Employer base', icon: '🏢' },
       { id: 'zoning', cat: 'feasibility', w: 40, label: 'Zoning', icon: '🏗️' },
       { id: 'site', cat: 'feasibility', w: 35, label: 'Parking & site size', icon: '🅿️' },
       { id: 'terrain', cat: 'feasibility', w: 15, label: 'Elevation, slope & flood', icon: '⛰️' },
@@ -798,10 +820,11 @@
       primary: [[2000, 10], [8000, 35], [20000, 60], [40000, 80], [70000, 100]],
       multi: [[15000, 10], [50000, 35], [120000, 60], [250000, 80], [450000, 100]],
       urgent: [[3000, 10], [10000, 35], [25000, 60], [50000, 80], [80000, 100]],
-      chc: [[5000, 10], [20000, 35], [50000, 60], [100000, 80], [180000, 100]]
+      chc: [[5000, 10], [20000, 35], [50000, 60], [100000, 80], [180000, 100]],
+      hospital: [[40000, 10], [120000, 35], [300000, 60], [600000, 80], [1000000, 100]]
     },
     // Straight-line fallback when drive times are unavailable (miles).
-    fallbackMiles: { primary: 4, multi: 10, urgent: 4, chc: 6 },
+    fallbackMiles: { primary: 4, multi: 10, urgent: 4, chc: 6, hospital: 15 },
     payer: {
       commercial: [[35, 15], [45, 40], [55, 65], [62, 85], [70, 100]],   // % employer + direct-purchase
       income: [[45000, 15], [65000, 40], [85000, 65], [110000, 85], [140000, 100]],
@@ -841,6 +864,7 @@
       outlook: [[-3, 5], [0, 20], [5, 42], [10, 65], [15, 82], [20, 95], [25, 100]]  // % over the next 10 years (OFM county projections)
     },
     market: { unemployment: [[3, 100], [4.5, 80], [6, 60], [8, 40], [11, 20], [15, 5]] },  // % of the civilian labor force
+    employer: { perResident: [[15, 15], [30, 40], [50, 62], [80, 82], [120, 100]] },      // jobs located in the catchment per 100 residents (LODES)
     trajectory: { housing: [[-0.5, 5], [0, 15], [0.5, 35], [1, 55], [2, 78], [3, 92], [4.5, 100]] },  // % a year, housing units within 2 miles
     transit: { nearStop: 45, farStop: 25, perRoute: 8, routesMax: 35, rail: 20 },
     site: {
@@ -863,7 +887,8 @@
       primary: [[0.5, 100], [1.5, 80], [3, 55], [6, 30], [10, 15]],
       multi: [[1, 100], [3, 75], [6, 50], [10, 30]],
       urgent: [[0, 100], [0.2, 80], [0.5, 55], [1, 30], [2, 15]],
-      chc: [[0, 100], [1, 75], [3, 45], [6, 20]]                          // per 10,000 Medicaid/uninsured residents
+      chc: [[0, 100], [1, 75], [3, 45], [6, 20]],                         // per 10,000 Medicaid/uninsured residents
+      hospital: [[0.05, 100], [0.1, 80], [0.15, 60], [0.25, 35], [0.4, 15]] // general and critical access hospitals
     },
     terrain: {
       slope: [[2, 100], [5, 85], [8, 60], [12, 35], [18, 15]],            // % grade across 50 m around the pin
@@ -894,7 +919,7 @@
       'U.S. Census Bureau, American Community Survey (ACS) 5-Year Estimates for every Washington county and census tract. A GitHub Action reads the Census Bureau\'s keyless ACS Summary Files each month and publishes them with the map, so the browser never calls the Census API (which has required an API key since May 2026). The vintage in use is shown in the layer legend; the newest published vintage is picked up automatically.',
       'Land area and tract names: U.S. Census Bureau Gazetteer files. Boundaries: Census cartographic boundary files (1:500,000, clipped to the shoreline), pre-built with the map; TIGERweb is the fallback.',
       'Median values are ACS estimates and carry margins of error; small tracts have wider error bands. Values suppressed by the Census Bureau are shown as "no data".',
-      'Population growth for the site evaluation: Washington State Office of Financial Management (OFM) Small Area Estimates Program, April 1 population and housing unit estimates for every 2020 census tract since OFM\'s adjusted 2020 census count, and OFM\'s Growth Management Act county population projections (middle series), built monthly with the map. Age bands come from ACS table B01001 (sex by age).'
+      'Population growth for the site evaluation: Washington State Office of Financial Management (OFM) Small Area Estimates Program, April 1 population and housing unit estimates for every 2020 census tract since OFM\'s adjusted 2020 census count, and OFM\'s Growth Management Act county population projections (middle series), built monthly with the map. Age bands come from ACS table B01001 (sex by age); the demographics layer maps the shares 65 and over and under 15, and a care-use index: the physician office visits the age mix would make at national visit rates by age (National Ambulatory Medical Care Survey 2019), relative to the U.S. average of 1.00.'
     ]},
     { section: 'Health insurance', items: [
       'U.S. Census Bureau, American Community Survey 5-Year Estimates, for every county and census tract: detailed table B27010 (types of health insurance coverage by age); B27002 and B27003 (private and public health insurance by sex by age); and C27004 to C27009 (employer-based, direct-purchase, Medicare, Medicaid/means-tested, TRICARE/military and VA health coverage by sex by age; the 5-year estimates publish these single-type tables with collapsed age groups, as C tables). Universe: the civilian noninstitutionalized population, so active-duty military and people living in institutions are not included. Each area\'s profile links its tables on data.census.gov.',
@@ -946,20 +971,21 @@
       { label: 'Washington State Zoning Atlas (WA Commerce)', url: 'https://www.commerce.wa.gov/growth-management/data-research/waza/' }
     ]},
     { section: 'Medical site evaluation', items: [
-      'Opened from a dropped pin, it scores the spot for a medical clinic on the six weighted criteria of a healthcare site ranking: market demand & growth, access & connectivity, competitive positioning, financial viability, site feasibility, and visibility & long-term potential. Each criterion is scored 0-100 as the weighted average of the factors below and shown on a 1-5 scale: 5 Excellent (85+), 4 Strong (70-84), 3 Average (50-69), 2 Below average (30-49), 1 Poor (below 30). The use type\'s weights combine the criteria into an overall score out of 100, rated on the same scale; the weighted average of the 1-5 ratings is shown beside it.',
-      'Default weights (demand, access, competition, financial, feasibility, visibility): primary care 30/20/20/15/10/5; multispecialty or medical office 30/15/20/20/10/5; urgent care 25/25/20/10/10/10; community health center 30/25/15/15/10/5. They can be edited in the panel or the ranking and are kept in this browser for each use type; weights that do not add up to 100 are scaled. A factor whose data could not be loaded is left out and the others in its criterion reweighted, and the panel says how much of the weight was scored. A zoning score of 10 or less (neither offices nor retail permitted, or a low-density residential or open-space zone with no recorded uses) caps the rating at Below average and ranks the site after the others.',
-      'Market demand & growth. Demand (70%): residents of census tracts whose internal point lies within the drive time (10 minutes for primary and urgent care, 15 for a health center, 20 for multispecialty; Valhalla routing over OpenStreetMap, straight-line circles if routing is down), each counted at the national rate of physician office visits for their age (National Ambulatory Medical Care Survey 2019, NCHS: 1.9 visits a year under 15, 1.6 at 15-24, 2.0 at 25-44, 3.7 at 45-64, 6.6 at 65-74 and 7.8 at 75 and over, against 3.2 for everyone; ages from ACS table B01001), scored on a log scale; urgent care counts residents alone. Population growth (30%): the catchment\'s annual growth from OFM\'s adjusted 2020 census count to its latest April 1 small-area estimate (60%), and the next ten years of OFM\'s Growth Management Act county projections (middle series) for the counties it spans, weighted by its residents in each (40%).',
-      'Access & connectivity. Arterial & freeway access (70%; 80% for urgent care, 50% for a health center): distance to the nearest road of each federal functional class (WSDOT), 75%, and to the nearest freeway interchange (OpenStreetMap), 25%. Public transit (30%; 20% for urgent care, 50% for a health center): stops within a quarter and half mile, routes within a quarter mile and rail within half a mile (WSDOT statewide GTFS).',
-      'Competitive positioning. Competition (65%; 55% for multispecialty): same-type providers in the catchment per 10,000 residents (per 10,000 Medicaid or uninsured residents for a health center); private practices are undercounted in open data, so treat it as indicative. Hospital & care adjacency (35%; 45% for multispecialty): distance to the nearest hospital (55%), clinics and practices within a mile (25%) and pharmacies within a mile (20%), from the amenities layer\'s registries and OpenStreetMap.',
-      'Financial viability. Payer mix & income (80%): employer plus direct-purchase coverage (60%) and population-weighted median household income (40%); multispecialty adds Medicare share; a health center scores its Medicaid and uninsured share instead (ACS 5-year tables B27010, C27007, B19013). Labor market (20%, left out for a health center): the population-weighted unemployment rate in the catchment (ACS table B23025).',
-      'Site feasibility. Zoning (40%): the atlas\'s office-use permission (permitted 100, conditional 60, limited 35, not permitted 5, or 25 where retail and services are permitted), else a typical value for the zone class. Parking & site size (35%): the parcel\'s area (Washington statewide tax parcels) against the land a building of the entered size needs with surface parking (one story up to 20,000 sf and two above; stalls at the use type\'s ratio or the zone\'s office minimum if higher, 325 sf per stall, plus 35% for setbacks and landscaping), 60%, and mapped parking on the parcel or within 400 ft against the stalls needed (OpenStreetMap; stall counts estimated from lot area where not tagged), 40%; a vacant parcel (undeveloped land use, or no building value) is scored on its area alone. No owner information is read. Elevation, slope & flood (15%): ground slope across 50 m around the pin (USGS 3DEP via the Elevation Point Query Service; a 90 m model if it is down) and the FEMA flood zone (a pin in the 1% annual chance floodplain scores at most 25). Shelters nearby (10%): distance to the nearest shelter for people experiencing homelessness (OpenStreetMap; closer scores lower for private clinics and higher for a health center). Shelters that may serve abuse victims or minors (tagged for them, or women-only and not tagged for homelessness) are never used, and only distances are shown.',
-      'Visibility & long-term potential. Frontage & traffic (45%): the road the site is best seen from (distance to its centreline, by functional class), 60%, and passing traffic, 40%: the annual average daily traffic on a state route within 150 m (WSDOT traffic counts), or a typical volume for the road\'s class where no count is near. Retail corridor & amenities (35%): a grocery store within half a mile or a mile, restaurants and shops within half a mile, a bank within a mile. Nearby housing growth (20%): the annual change in housing units since 2020 in census tracts within 2 miles (OFM small-area estimates).',
-      'Site ranking compares up to eight pins on the same use type, building size and weights: a column per site, best first, with each criterion\'s 1-5 rating, a bar and the facts behind it (its heaviest factor, and any factor scoring below 35), and the overall score labelled most favorable, second most favorable or less favorable. It reuses each pin\'s evaluation, so changing the use type or a weight re-ranks without fetching again. It copies as text or downloads as CSV.',
-      'The write-up states the rating, the zoning and the strongest and weakest criteria in plain sentences, flags any factor scoring below 35, and lists anything that could not be scored. This is a screening estimate, not an appraisal, a market study or a zoning determination: confirm zoning, the parcel, access and utilities with the jurisdiction and a site visit.'
+      'Opened from a dropped pin, it scores the spot for a medical clinic on six weighted criteria, as a healthcare site search does: demand & growth, access & transit, competition & care nearby, payer & economic strength, zoning & site readiness, and visibility & outlook. Each criterion is scored 0-100 as the weighted average of the factors below and shown on a 1-5 scale: 5 very strong (85+), 4 strong (70-84), 3 fair (50-69), 2 weak (30-49), 1 very weak (below 30). The use type\'s weights combine the criteria into an overall score out of 100, rated on the same scale; the weighted average of the 1-5 ratings is shown beside it.',
+      'Default weights (demand, access, competition, financial, feasibility, visibility): primary care 30/20/20/15/10/5; multispecialty or medical office 30/15/20/20/10/5; urgent care 25/25/20/10/10/10; community health center 30/25/15/15/10/5; hospital or inpatient campus 30/20/20/15/10/5. They can be edited in the panel or the ranking and are kept in this browser for each use type; weights that do not add up to 100 are scaled. A factor whose data could not be loaded is left out and the others in its criterion reweighted, and the panel says how much of the weight was scored. A zoning score of 10 or less (neither offices nor retail permitted, or a low-density residential or open-space zone with no recorded uses) caps the rating at weak and ranks the site after the others.',
+      'Demand & growth. Demand (70%): residents of census tracts whose internal point lies within the drive time (10 minutes for primary and urgent care, 15 for a health center, 20 for multispecialty, 30 for a hospital; Valhalla routing over OpenStreetMap, straight-line circles if routing is down), each counted at the national rate of physician office visits for their age (National Ambulatory Medical Care Survey 2019, NCHS: 1.9 visits a year under 15, 1.6 at 15-24, 2.0 at 25-44, 3.7 at 45-64, 6.6 at 65-74 and 7.8 at 75 and over, against 3.2 for everyone; ages from ACS table B01001), scored on a log scale; urgent care counts residents alone. Population growth (30%): the catchment\'s annual growth from OFM\'s adjusted 2020 census count to its latest April 1 small-area estimate (60%), and the next ten years of OFM\'s Growth Management Act county projections (middle series) for the counties it spans, weighted by its residents in each (40%).',
+      'Access & transit. Arterial & freeway access (70%; 80% for urgent care, 50% for a health center): distance to the nearest road of each federal functional class (WSDOT), 75%, and to the nearest freeway interchange (OpenStreetMap), 25%. Public transit (30%; 20% for urgent care, 50% for a health center): stops within a quarter and half mile, routes within a quarter mile and rail within half a mile (WSDOT statewide GTFS).',
+      'Competition & care nearby. Competition (65%; 55% for multispecialty): same-type providers in the catchment per 10,000 residents (per 10,000 Medicaid or uninsured residents for a health center; for a hospital, general and critical access hospitals per 100,000 residents); private practices are undercounted in open data, so treat it as indicative. Hospital & care adjacency (35%; 45% for multispecialty; left out for a hospital, where other hospitals are competitors): distance to the nearest hospital (55%), clinics and practices within a mile (25%) and pharmacies within a mile (20%), from the amenities layer\'s registries and OpenStreetMap.',
+      'Payer & economic strength. Payer mix & income (70%): employer plus direct-purchase coverage (60%) and population-weighted median household income (40%); multispecialty and hospitals add Medicare share; a health center scores its Medicaid and uninsured share instead (ACS 5-year tables B27010, C27007, B19013). Labor market (15%): the population-weighted unemployment rate in the catchment (ACS table B23025). Employer base (15%): jobs located in the catchment per 100 residents (U.S. Census Bureau LEHD Origin-Destination Employment Statistics, workplace area characteristics, summed to census tracts), for employer-sponsored coverage and daytime visits from people who work nearby. A health center leaves out the labor market and the employer base.',
+      'Zoning & site readiness. Zoning (40%): the atlas\'s office-use permission (permitted 100, conditional 60, limited 35, not permitted 5, or 25 where retail and services are permitted), else a typical value for the zone class; for a hospital this is only a first read, since codes often treat hospitals as institutional or conditional uses. Parking & site size (35%): the parcel\'s area (Washington statewide tax parcels) against the land a building of the entered size needs with surface parking (one story up to 20,000 sf and two above; stalls at the use type\'s ratio or the zone\'s office minimum if higher, 325 sf per stall, plus 35% for setbacks and landscaping), 60%, and mapped parking on the parcel or within 400 ft against the stalls needed (OpenStreetMap; stall counts estimated from lot area where not tagged), 40%; a vacant parcel (undeveloped land use, or no building value) is scored on its area alone. A hospital campus is taken as four stories at 2 stalls per 1,000 sf, measured against at least 15 acres, on parcel area alone (it builds its own parking); campuses are often assembled from several parcels, and only the parcel at the pin is checked. The building size is kept for each use type. No owner information is read. Elevation, slope & flood (15%): ground slope across 50 m around the pin (USGS 3DEP via the Elevation Point Query Service; a 90 m model if it is down) and the FEMA flood zone (a pin in the 1% annual chance floodplain scores at most 25). Shelters nearby (10%): distance to the nearest shelter for people experiencing homelessness (OpenStreetMap; closer scores lower for private clinics and higher for a health center). Shelters that may serve abuse victims or minors (tagged for them, or women-only and not tagged for homelessness) are never used, and only distances are shown.',
+      'Visibility & outlook. Frontage & traffic (45%): the road the site is best seen from (distance to its centreline, by functional class), 60%, and passing traffic, 40%: the annual average daily traffic on a state route within 150 m (WSDOT traffic counts), or a typical volume for the road\'s class where no count is near. Retail corridor & amenities (35%): a grocery store within half a mile or a mile, restaurants and shops within half a mile, a bank within a mile. Nearby housing growth (20%): the annual change in housing units since 2020 in census tracts within 2 miles (OFM small-area estimates).',
+      'Site ranking compares up to eight pins on the same use type, building size and weights: a column per site, best first, with each criterion\'s 1-5 rating, a bar and two facts behind it (its heaviest factor, then the heaviest other factor scoring below 35, or else the next heaviest; zoning that could not be checked is said first), and the overall score labelled top-ranked, second-ranked or lower-ranked (tied sites share a rank). Two unweighted rows sit beside the criteria: catchment overlap, the share of a site\'s drive-time residents (by census tract) that another pin also reaches, which shows how much a new site would draw on an existing one\'s patients if one pin is an existing site; and the assessed land value per acre (county assessor, a rough guide to cost rather than a market price). It reuses each pin\'s evaluation, so changing the use type or a weight re-ranks without fetching again. It copies as text or downloads as CSV.',
+      'The write-up states the rating, the zoning and the strongest and weakest criteria in plain sentences (quoting a factor that fits each heading), flags up to two other factors scoring below 35, and lists anything that could not be scored. This is a screening estimate, not an appraisal, a market study or a zoning determination: confirm zoning, the parcel, access and utilities with the jurisdiction and a site visit.'
     ], links: [
       { label: 'OFM small area estimates', url: 'https://ofm.wa.gov/washington-data-research/population-demographics/population-estimates/small-area-estimates-program' },
       { label: 'OFM Growth Management Act county projections', url: 'https://ofm.wa.gov/washington-data-research/population-demographics/population-forecasts-and-projections/growth-management-act-county-projections' },
-      { label: 'National Ambulatory Medical Care Survey (NCHS)', url: 'https://www.cdc.gov/nchs/namcs/' }
+      { label: 'National Ambulatory Medical Care Survey (NCHS)', url: 'https://www.cdc.gov/nchs/namcs/' },
+      { label: 'LEHD Origin-Destination Employment Statistics (LODES)', url: 'https://lehd.ces.census.gov/data/' }
     ]},
     { section: 'Base maps', items: [
       '16 base maps, all keyless and free to use: OpenStreetMap and OSM Humanitarian; Esri Light/Dark Gray Canvas, World Imagery, Streets and Topographic; USGS The National Map (Imagery, Imagery+Topo, Topo, Shaded Relief, Hydrography); OpenTopoMap; OPNVKarte transit; CyclOSM; and WSDOT\'s Washington base map.',

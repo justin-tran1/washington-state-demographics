@@ -3,7 +3,7 @@
 import { chromium } from 'playwright-core';
 import { readFileSync, existsSync } from 'node:fs';
 
-const BASE = 'http://127.0.0.1:8137';
+const BASE = process.env.SMOKE_BASE || 'http://127.0.0.1:8137';
 // The app loads its data from the committed, pre-built files under data/
 // (served by the local web server); expectations are read from them too.
 const REPO = new URL('..', import.meta.url).pathname;
@@ -311,6 +311,9 @@ const GROWTH = { built: '2026-09-01T00:00:00Z', source: 'fixture',
     rows: Object.fromEntries(Object.keys(readData('acs/tract.json').rows).map(g => [g, [1000, 1060, 400, 430]])) },
   county: { series: 'middle', vintage: 2022, years: [2020, 2025, 2030, 2035, 2040, 2045, 2050],
     rows: { 53007: [79141, 82483, 85889, 89022, 91914, 94626, 97195], 53017: [42938, 45336, 47750, 50051, 52256, 54388, 56461] } } };
+// 500 jobs in every tract, 70 of them in health care.
+const JOBS = { built: '2026-09-01T00:00:00Z', year: 2023, source: 'fixture', fields: ['jobs', 'health'],
+  rows: Object.fromEntries(Object.keys(readData('acs/tract.json').rows).map(g => [g, [500, 70]])) };
 // An older age mix than average (index 1.14 at national visit rates by age).
 const AGES = { age0_14: 15, age15_24: 11, age25_44: 24, age45_64: 25, age65_74: 14, age75p: 11 };
 const TRACT_AGES = (() => {
@@ -351,6 +354,7 @@ function handle(url, method, postData) {
   const u = new URL(url);
   const full = u.href;
   if (u.hostname === '127.0.0.1' && u.pathname === '/data/growth.json') return jsonRes(GROWTH);
+  if (u.hostname === '127.0.0.1' && u.pathname === '/data/jobs.json') return jsonRes(JOBS);
   if (u.hostname === '127.0.0.1' && u.pathname === '/data/acs/tract.json') return { contentType: 'application/json', body: TRACT_AGES };
   if (u.hostname === '127.0.0.1') return null; // let the local server handle it
   if (u.hostname === 'unpkg.com' || u.hostname === 'cdn.jsdelivr.net') {
@@ -535,6 +539,13 @@ console.log('· metric switch + insurance exclusivity');
 await page.locator('#card-demographics select.input').selectOption('income');
 await page.waitForTimeout(700);
 assert(/Median household income/.test(await page.locator('.legend-block[data-layer="demographics"] .legend-title').textContent()), 'metric switch updates legend');
+await page.locator('#card-demographics select.input').selectOption('careUse');
+await page.waitForTimeout(700);
+assert(/Care-use index \(age mix\)/.test(await page.locator('.legend-block[data-layer="demographics"] .legend-title').textContent()) &&
+  await page.locator('#card-demographics select.input option[value="age65"]').count() === 1 && await page.locator('#card-demographics select.input option[value="age0_14"]').count() === 1,
+  'age heatmaps: the care-use index maps, and the shares 65 and over and under 15 are offered');
+await page.locator('#card-demographics select.input').selectOption('income');
+await page.waitForTimeout(500);
 await setToggle('card-insurance', true);
 await page.waitForTimeout(1200);
 assert(!(await page.locator('#card-demographics .card-toggle input').isChecked()), 'enabling insurance switched demographics off');
@@ -587,14 +598,22 @@ console.log('· health insurance: payer mix and insurance sources');
     }
     assert(n >= (lvl === 'county' ? 39 : 1500) && !bad.length,
       `${lvl} payer mix adds up to 100% in all ${n} areas and agrees with the coverage-type tables` + (bad.length ? ` (${bad.length} disagree, e.g. ${bad.slice(0, 3).join('; ')})` : ''));
-    // Age bands (B01001), once the build has published them: each area's add up to 100%.
+    // Age bands (B01001): published for every area, each area's adding up to 100%.
     const AGE = ['age0_14', 'age15_24', 'age25_44', 'age45_64', 'age65_74', 'age75p'];
-    if (AGE.every(f => F[f] != null)) {
-      const off = Object.entries(d.rows).filter(([, r]) => r[F.pop] > 0 && AGE.every(f => r[F[f]] != null) && Math.abs(AGE.reduce((a, f) => a + r[F[f]], 0) - 100) > 0.1);
-      assert(!off.length, `${lvl} age bands add up to 100%` + (off.length ? ` (${off.length} do not, e.g. ${off[0][0]})` : ''));
-    }
+    if (!AGE.every(f => F[f] != null)) { assert(false, `${lvl} data carries the age bands (missing ${AGE.filter(f => F[f] == null).join(', ')})`); continue; }
+    const withAges = Object.values(d.rows).filter(r => r[F.pop] > 0 && AGE.every(f => r[F[f]] != null)).length;
+    const off = Object.entries(d.rows).filter(([, r]) => r[F.pop] > 0 && AGE.every(f => r[F[f]] != null) && Math.abs(AGE.reduce((a, f) => a + r[F[f]], 0) - 100) > 0.1);
+    assert(!off.length && withAges >= (lvl === 'county' ? 39 : 1500), `${lvl} age bands add up to 100% in ${withAges} areas` + (off.length ? ` (${off.length} do not, e.g. ${off[0][0]})` : ''));
   }
-  // Tract growth estimates (OFM), once the build has published them.
+  // Jobs by tract (LEHD LODES), once the build has published them.
+  if (hasData('jobs.json')) {
+    const J = readData('jobs.json'), TR = readData('acs/tract.json').rows;
+    const rows = Object.entries(J.rows), total = rows.reduce((a, [, r]) => a + r[0], 0), health = rows.reduce((a, [, r]) => a + r[1], 0);
+    assert(J.fields.join() === 'jobs,health' && rows.length >= 1500 && rows.filter(([g]) => TR[g]).length / rows.length > 0.98 && total > 2.5e6 && total < 5.5e6 && health > 0.06 * total && health < 0.25 * total,
+      `data/jobs.json carries ${total} jobs (${health} in health care) by tract, ${J.year}`);
+  }
+  // Tract growth estimates (OFM) and county projections.
+  assert(hasData('growth.json'), 'data/growth.json is published');
   if (hasData('growth.json')) {
     const G = readData('growth.json'), TR = readData('acs/tract.json').rows;
     const rows = Object.entries(G.tract.rows), known = rows.filter(([g]) => TR[g]).length;
@@ -1522,7 +1541,7 @@ console.log('· medical site evaluation');
   const gradeOf = s => SE.scale.find(([min]) => s >= min);
   const catAvg = k => { const fs = k.factors.filter(f => f.w > 0); return Math.round(fs.reduce((t, f) => t + f.w * f.score, 0) / fs.reduce((t, f) => t + f.w, 0)); };
   assert(Object.values(r.status).every(s => s === 'ok') && Object.keys(r.status).length === 10, 'all ten sources answered: ' + JSON.stringify(r.status));
-  assert(SE.n === 15 && r.res.criteria.length === 15 && r.res.criteria.every(c => c.status === 'ok') && r.res.coverage === 100, 'all fifteen factors scored: ' + r.res.criteria.map(c => c.id + ':' + c.status).join(', '));
+  assert(SE.n === 16 && r.res.criteria.length === 16 && r.res.criteria.every(c => c.status === 'ok') && r.res.coverage === 100, 'all sixteen factors scored: ' + r.res.criteria.map(c => c.id + ':' + c.status).join(', '));
   assert(r.res.categories.map(k => k.id).join() === 'demand,access,competition,financial,feasibility,visibility' &&
     r.res.categories.every(k => k.status === 'ok' && k.score === catAvg(k) && k.grade.n === gradeOf(k.score)[1] && k.grade.label === gradeOf(k.score)[2]),
     'six criteria, each the weighted average of its factors and rated 1-5: ' + r.res.categories.map(k => `${k.id} ${k.w}% ${k.score} (${k.grade && k.grade.n} ${k.grade && k.grade.label})`).join(', '));
@@ -1552,11 +1571,32 @@ console.log('· medical site evaluation');
   assert(/^the housing stock within 2 miles grew about 1\.2% a year from 2020 to 2026 \(\+[\d,]+ homes\)$/.test(C('trajectory').fact) && C('trajectory').cat === 'visibility',
     'housing growth near the site counts toward long-term potential: ' + C('trajectory').fact);
   assert(/^unemployment within a 10-minute drive is about \d+\.\d%$/.test(C('market').fact) && C('market').cat === 'financial', 'market strength: unemployment in the catchment: ' + C('market').fact);
+  assert(/^about [\d,]+ people work within a 10-minute drive \(\d+ jobs per 100 residents\)$/.test(C('employer').fact) && C('employer').cat === 'financial' &&
+    C('employer').details.some(t => /\(2023, all jobs by place of work\)/.test(t) && /Washington: \d+\)/.test(t)), 'employer base: jobs located in the catchment per resident: ' + C('employer').fact);
   assert(/employer or direct-purchase coverage/.test(C('payer').fact) && C('payer').details.some(t => /Payer mix within a 10-minute drive/.test(t)), 'payer mix of the catchment from the ACS');
+  // The new factors' scores, recomputed from the fixture inputs and the configured anchors.
+  {
+    const SEV = await page.evaluate(() => { const S = WAMAP.CONFIG.SITE_EVAL; return { demand: S.demand.primary, growth: S.growth, market: S.market, employer: S.employer, trajectory: S.trajectory }; });
+    const ramp = (x, pts, log) => page.evaluate(([a, b, c]) => WAMAP.siteEvalInternals.ramp(a, b, c), [x, pts, !!log]);
+    const m = C('demand').details[0].match(/: ([\d,]+) in [\d,]+ households? \((\d+) census tracts?\)/);
+    const pop = +m[1].replace(/,/g, ''), tracts = +m[2];
+    const outlook = +C('growth').details[1].match(/: ([+−-][\d.]+)% from 2026 to 2036/)[1].replace('−', '-');
+    const unemp = +C('market').fact.match(/about ([\d.]+)%/)[1];
+    const expect = {
+      demand: Math.round(await ramp(pop * AGE_INDEX, SEV.demand, true)),
+      growth: Math.round(0.6 * await ramp((Math.pow(1.06, 1 / 6) - 1) * 100, SEV.growth.recent) + 0.4 * await ramp(outlook, SEV.growth.outlook)),
+      trajectory: Math.round(await ramp((Math.pow(430 / 400, 1 / 6) - 1) * 100, SEV.trajectory.housing)),
+      employer: Math.round(await ramp(100 * 500 * tracts / pop, SEV.employer.perResident)),
+      market: Math.round(await ramp(unemp, SEV.market.unemployment))
+    };
+    const got = Object.fromEntries(Object.keys(expect).map(k => [k, C(k).score]));
+    const ok = ['demand', 'trajectory', 'employer'].every(k => got[k] === expect[k]) && Math.abs(got.growth - expect.growth) <= 1 && Math.abs(got.market - expect.market) <= 1;
+    assert(ok && expect.trajectory === 60, 'the new factors score as configured (age-weighted demand, the 60/40 growth blend, housing growth, employer base, unemployment): ' + JSON.stringify({ got, expect }));
+  }
   assert(r.res.criteria.every(c => typeof c.brief === 'string' && c.brief.length > 2 && c.brief.length <= 44), 'every factor has a short phrase for the ranking table: ' + r.res.criteria.map(c => c.brief).join(' | '));
-  assert(/rates (Excellent|Strong|Average|Below average|Poor) \(\d+ of 100\) for a primary care clinic, \d\.\d of 5 on the weighted criteria\./.test(r.writeup) && /It is zoned Community Commercial/.test(r.writeup) &&
+  assert(/rates (Very strong|Strong|Fair|Weak|Very weak) \(\d+ of 100\) for a primary care clinic, \d\.\d of 5 on the weighted criteria\./.test(r.writeup) && /It is zoned Community Commercial/.test(r.writeup) &&
     /In its favor: [a-z &-]+ \([1-5] of 5\): /.test(r.writeup) && /screening estimate/.test(r.writeup), 'the write-up states the rating, the zoning and the strongest criteria: ' + r.writeup.slice(0, 220));
-  assert(await page.locator('#site-eval .se-cat').count() === 6 && await page.locator('#site-eval .se-cat .se-crit').count() === 15 &&
+  assert(await page.locator('#site-eval .se-cat').count() === 6 && await page.locator('#site-eval .se-cat .se-crit').count() === 16 &&
     (await page.locator('#site-eval .se-cat[data-cat="demand"] .se-grade').textContent()) === String(K('demand').grade.n),
     'the panel lists the six criteria with their 1-5 ratings, each holding its factors');
   const overlayN = await page.evaluate(() => { let n = 0; WAMAP.map.eachLayer(l => { if (l.feature && l.feature.geometry && /Polygon/.test(l.feature.geometry.type) && l.options && l.options.interactive === false && l.options.dashArray === '6 5') n++; }); return n; });
@@ -1582,14 +1622,22 @@ console.log('· medical site evaluation');
   // use type and size
   await page.locator('#site-eval select.se-profile').selectOption('chc');
   r = await page.evaluate(() => WAMAP.siteEval.result());
-  assert(K('access').w === 25 && C('transit').w === 50 && C('market').w === 0 && !K('financial').factors.some(f => f.id === 'market') &&
+  assert(K('access').w === 25 && C('transit').w === 50 && C('market').w === 0 && C('employer').w === 0 && K('financial').factors.map(f => f.id).join() === 'payer' &&
     /for a community health center/i.test(r.writeup) && /rely on Medicaid or are uninsured/.test(C('payer').fact),
-    'a community health center weighs access and transit more, scores the Medicaid and uninsured share and leaves out the labor market');
+    'a community health center weighs access and transit more, scores the Medicaid and uninsured share and leaves out the labor market and employer base');
   await page.locator('#site-eval select.se-profile').selectOption('urgent');
   r = await page.evaluate(() => WAMAP.siteEval.result());
   assert(K('access').w === 25 && K('visibility').w === 10 && C('demand').details.some(t => /Urgent care use varies less with age/.test(t)) && !/age mix/.test(C('demand').fact),
     'urgent care weighs access and visibility more and scores residents rather than visits');
+  await page.locator('#site-eval select.se-profile').selectOption('hospital');
+  r = await page.evaluate(() => WAMAP.siteEval.result());
+  assert((await page.locator('#site-eval .se-sqft').inputValue()) === '200000' && C('health').w === 0 && !K('competition').factors.some(f => f.id === 'health') &&
+    /^\d+ hospitals? (is|are) mapped within the 30-minute drive \(\d+\.\d per 100,000 residents\)$/.test(C('competition').fact) && /within a 30-minute drive/.test(C('demand').fact) &&
+    C('site').details.some(t => /planned on 15 acres or more/.test(t)) && /parcel is smaller than the roughly 15 acres a 200,000 sf hospital campus typically needs$/.test(C('site').fact) &&
+    /needs assembly/.test(C('site').brief) && !C('site').details.some(t => /Mapped parking/.test(t)),
+    'a hospital campus: a 30-minute catchment, other hospitals counted as competitors, and the parcel measured against a 15-acre campus: ' + C('competition').fact + ' | ' + C('site').fact);
   await page.locator('#site-eval select.se-profile').selectOption('primary');
+  assert((await page.locator('#site-eval .se-sqft').inputValue()) === '10000', 'the building size is kept for each use type');
   await page.locator('#site-eval .se-sqft').fill('40000');
   await page.locator('#site-eval .se-sqft').dispatchEvent('change');
   r = await page.evaluate(() => WAMAP.siteEval.result());
@@ -1601,7 +1649,7 @@ console.log('· medical site evaluation');
   await page.locator('#site-eval button', { hasText: 'Re-run' }).click();
   r = await waitDone();
   const z = r.res.criteria.find(c => c.id === 'zoning');
-  assert(z.score === 5 && r.res.gated && r.res.grade.n <= 2 && ['Below average', 'Poor'].includes(r.res.rating) && z.details.some(t => /shows R6, not the atlas's CC .*the score uses the city's current zone/.test(t)) && /caps the rating/.test(r.writeup),
+  assert(z.score === 5 && r.res.gated && r.res.grade.n <= 2 && ['Weak', 'Very weak'].includes(r.res.rating) && z.details.some(t => /shows R6, not the atlas's CC .*the score uses the city's current zone/.test(t)) && /caps the rating/.test(r.writeup),
     'a rezone on the city\'s live map is scored and caps the rating: ' + r.res.rating + '; ' + z.details.join(' | '));
   site.liveCode = 'CC';
   // sources that fail: straight-line catchment, unscored criteria named
@@ -1632,8 +1680,22 @@ console.log('· medical site evaluation');
       byKey: { 10: agg, 15: agg, 20: agg }, tests: { 10: () => false }, geoms: {}, growth: { error: 'HTTP 404 from 127.0.0.1' } } }) };
     const res2 = I.evaluate(run2, P[0], 10000);
     const f = (x, id) => x.criteria.find(c => c.id === id);
+    // Roads failed and no state count within 150 m: visibility is not scored, rather than scored 10.
+    const run3 = { status: Object.assign({}, st, { roads: 'error' }), errors: { roads: 'timeout' }, data: { traffic: { sections: [] }, osm: run.data.osm } };
+    const vis3 = f(I.evaluate(run3, P[0], 10000), 'visibility');
+    // Roads loaded but traffic counts failed: frontage is scored, passing traffic taken as typical.
+    const run4 = { status: Object.assign({}, st, { traffic: 'error' }), errors: { traffic: 'timeout' }, data: { roads: run.data.roads, osm: run.data.osm } };
+    const vis4 = f(I.evaluate(run4, P[0], 10000), 'visibility');
+    // A heading never quotes a factor that contradicts it: a strong criterion with a weak parcel.
+    const fac = (id, score, fact, w) => ({ id, cat: 'feasibility', status: 'ok', score, fact, w });
+    const feasWith = (zoning, site, score) => ({ id: 'feasibility', label: 'Zoning & site readiness', status: 'ok', w: 10, score, grade: { n: 4, label: 'Strong' }, factorTotal: 100,
+      factors: [fac('zoning', zoning, 'it is zoned C-2', 40), fac('site', site, site >= 70 ? 'the parcel has room for it' : 'the parcel is smaller than it needs', 35), fac('terrain', 100, 'the ground is flat', 15), fac('shelters', 100, 'no shelters are mapped within 2 miles', 10)] });
+    const wuOf = feas => I.writeUp({ overall: feas.score, rating: 'Strong', stars: 4, coverage: 100, gated: false, categories: [feas], criteria: feas.factors }, P[0], 'Test site');
+    // Zoning drives the strong criterion (said in its own sentence); then a parcel that fits drives it.
+    const wu = [wuOf(feasWith(100, 51, 83)), wuOf(feasWith(70, 95, 86))];
     const dc = res2.categories.find(c => c.id === 'demand');
-    return { access: f(res, 'access').fact, visibility: f(res, 'visibility').fact, demand: f(res2, 'demand'), growth: f(res2, 'growth'), trajectory: f(res2, 'trajectory').status,
+    return { vis3: vis3.status + ':' + (vis3.na || ''), vis4: [vis4.status, vis4.fact, vis4.details.join(' | ')], wu,
+      access: f(res, 'access').fact, visibility: f(res, 'visibility').fact, demand: f(res2, 'demand'), growth: f(res2, 'growth'), trajectory: f(res2, 'trajectory').status,
       demandCat: { score: dc.score, share: dc.share }, coverage: res2.coverage,
       valueAt: [I.valueAt([2020, 2025, 2030], [100, 110, 120], 2026), I.valueAt([2020, 2025, 2030], [100, 110, 120], 2036)] };
   });
@@ -1643,6 +1705,11 @@ console.log('· medical site evaluation');
     unit.trajectory === 'na' && unit.demandCat.score === unit.demand.score && unit.demandCat.share === 0.7 && unit.coverage < 100,
     'without age bands or the growth file, demand counts residents and the criterion is scored on what is left: ' + JSON.stringify(unit.demandCat));
   assert(unit.valueAt[0] === 112 && unit.valueAt[1] === 132, 'projections are read between the 5-year points and extended past the last one');
+  assert(unit.vis3 === 'na:Road data could not be loaded, so frontage was not scored.' && unit.vis4[0] === 'ok' && unit.vis4[1] === 'Main St, a principal arterial, passes 130 ft away' &&
+    /WSDOT traffic counts could not be checked; passing traffic is taken as typical for a principal arterial/.test(unit.vis4[2]),
+    'visibility needs the road network; without traffic counts it takes typical traffic and says so: ' + JSON.stringify([unit.vis3, unit.vis4]));
+  assert(!/In its favor/.test(unit.wu[0]) && !/parcel is smaller/.test(unit.wu[0]) && /In its favor: zoning & site readiness \(4 of 5\): the parcel has room for it\./.test(unit.wu[1]),
+    'the write-up quotes the factor that drives a criterion and fits its heading, and leaves zoning to its own sentence: ' + JSON.stringify(unit.wu));
   // ---- the ranking of every pin, on the same runs
   console.log('· site ranking');
   await page.locator('#site-eval button', { hasText: 'Re-run' }).click();
@@ -1653,12 +1720,18 @@ console.log('· medical site evaluation');
   await page.mouse.click(sp2.x, sp2.y);
   await page.evaluate(() => { WAMAP.modes.cancel(); });
   await page.waitForTimeout(300);
+  // A third pin, in a business zone north-east: dropped after the single-family one but expected to rank above it.
+  await page.locator('#pin-mode-btn').click();
+  const sp3 = await mapPoint([SITE.lat + 0.003, SITE.lon + 0.004]);
+  await page.mouse.click(sp3.x, sp3.y);
+  await page.evaluate(() => { WAMAP.modes.cancel(); });
+  await page.waitForTimeout(300);
   const pinIds = await page.evaluate(() => WAMAP.pins.list().map(p => p.id));
-  assert(pinIds.length === 2, 'a second pin is dropped');
+  assert(pinIds.length === 3, 'two more pins are dropped');
   await page.locator('.user-pin').last().click();
   await page.waitForTimeout(300);
   const rankBtn = page.locator('.leaflet-popup-content button', { hasText: 'Rank all pins' });
-  assert(await rankBtn.count() === 1, 'with two pins, a pin popup offers "Rank all pins"');
+  assert(await rankBtn.count() === 1, 'with several pins, a pin popup offers "Rank all pins"');
   await rankBtn.click();
   assert(await page.locator('#rank-modal').isVisible(), 'the ranking opens');
   const waitRank = async () => {
@@ -1670,16 +1743,27 @@ console.log('· medical site evaluation');
     return page.evaluate(() => WAMAP.siteRanking.result());
   };
   let rk = await waitRank();
-  assert(rk.rows.length === 2 && rk.rows[0].pinId === pinIds[0] && rk.rows[0].rank === 1 && rk.rows[0].rankLabel === 'Most favorable option' && rk.rows[0].overall === r.res.overall,
-    'the site zoned for offices ranks first, with the panel\'s score: ' + JSON.stringify(rk.rows.map(x => [x.label, x.overall, x.rankLabel])));
-  assert(rk.rows[1].pinId === pinIds[1] && rk.rows[1].gated && rk.rows[1].rank === 2 && /^Zoning barrier/.test(rk.rows[1].rankLabel),
-    'a site whose zoning rules out medical use ranks after the others and says why: ' + rk.rows[1].rankLabel);
-  assert((site.hits.parcels || 0) - (hitsAtRank.parcels || 0) === 1 && (site.hits.valhalla || 0) - (hitsAtRank.valhalla || 0) === 1,
-    'only the new pin is fetched; the evaluated one is reused');
-  assert(await page.locator('#rank-modal .rank-table thead th.rank-site').count() === 2 && await page.locator('#rank-modal .rank-table tbody tr').count() === 7 &&
-    (await page.locator('#rank-modal .rank-label').first().textContent()) === 'Most favorable option' &&
+  const byPin = id => rk.rows.find(x => x.pinId === id);
+  const order = rk.rows.map(x => x.pinId);
+  const open = rk.rows.filter(x => !x.gated);
+  assert(rk.rows.length === 3 && open.length === 2 && open.every((x, i) => i === 0 || open[i - 1].overall >= x.overall) && order.slice(0, 2).join() === open.map(x => x.pinId).join() &&
+    order[2] === pinIds[1] && order.join() !== pinIds.join(), 'sites are ranked by score, not by the order they were dropped: ' + JSON.stringify(rk.rows.map(x => [x.pinId === pinIds[0] ? 'A' : x.pinId === pinIds[1] ? 'B' : 'C', x.overall, x.rankLabel])));
+  assert(byPin(pinIds[0]).overall === r.res.overall && rk.rows[0].rankLabel === 'Top-ranked site' && rk.rows[1].rankLabel === 'Second-ranked site' && rk.rows[0].rank === 1 && rk.rows[1].rank === 2,
+    'the ranked sites carry the panel\'s score and their rank labels');
+  assert(byPin(pinIds[1]).gated && byPin(pinIds[1]).rank === 3 && byPin(pinIds[1]).rankLabel === 'Zoning barrier: offices not permitted' && !byPin(pinIds[2]).gated,
+    'a site whose zoning rules out medical use ranks after the others and says why: ' + byPin(pinIds[1]).rankLabel);
+  assert((site.hits.parcels || 0) - (hitsAtRank.parcels || 0) === 2 && (site.hits.valhalla || 0) - (hitsAtRank.valhalla || 0) === 2,
+    'only the new pins are fetched; the evaluated one is reused');
+  const ovA = byPin(pinIds[0]).overlap;
+  assert(ovA && ovA.share > 0.9 && pinIds.slice(1).includes(ovA.with) && rk.rows.every(x => x.overlap && x.overlap.with !== x.pinId) &&
+    Math.round(byPin(pinIds[0]).landPerAcre) === Math.round(1200000 / (85600 / 43560)) && byPin(pinIds[1]).landPerAcre === null &&
+    await page.locator('#rank-modal tr.rank-info').count() === 2 && /% of residents shared with #\d/.test(await page.locator('#rank-modal tr.rank-info').first().textContent()) &&
+    /\$611k per acre/.test(await page.locator('#rank-modal tr.rank-info').nth(1).textContent()),
+    'unweighted rows: pins a few hundred metres apart share nearly all their catchment residents, and the parcel\'s assessed land value per acre: ' + JSON.stringify(rk.rows.map(x => [x.overlap, x.landPerAcre])));
+  assert(await page.locator('#rank-modal .rank-table thead th.rank-site').count() === 3 && await page.locator('#rank-modal .rank-table tbody tr').count() === 9 &&
+    (await page.locator('#rank-modal .rank-label').first().textContent()) === 'Top-ranked site' &&
     await page.locator('#rank-modal .rank-table tbody tr').first().locator('.rank-briefs li').count() >= 2,
-    'the table has a column per site, a row per criterion with its rating and facts, and the overall score');
+    'the table has a column per site, a row per criterion with its rating and facts, the unweighted rows and the overall score');
   const hitsMid = JSON.stringify(site.hits);
   await page.locator('#rank-modal select.rank-profile').selectOption('multi');
   rk = await page.evaluate(() => WAMAP.siteRanking.result());
@@ -1689,20 +1773,64 @@ console.log('· medical site evaluation');
   await page.locator('#rank-modal .rank-win[data-cat="demand"]').dispatchEvent('change');
   rk = await page.evaluate(() => WAMAP.siteRanking.result());
   assert(rk.weights.demand === 50 && (await page.locator('#site-eval .se-win[data-cat="demand"]').inputValue()) === '50', 'a weight edited in the table applies to the ranking and the panel');
+  // An update while a weight is half typed waits for it; a committed edit keeps its place.
+  const acc = page.locator('#rank-modal .rank-win[data-cat="access"]');
+  await acc.focus();
+  await page.keyboard.press('End');
+  await page.keyboard.type('2'); // "152", not committed yet
+  await page.evaluate(() => WAMAP.siteData.setPrefs({}));
+  await page.waitForTimeout(150);
+  const midEdit = await page.evaluate(() => ({ cat: document.activeElement.dataset.cat, value: document.activeElement.value, stored: WAMAP.siteData.weightsFor(WAMAP.siteData.prefs.profile).access }));
+  await page.keyboard.press('Control+A');
+  await page.keyboard.type('25');
+  await page.keyboard.press('Enter');
+  await page.waitForTimeout(150);
+  const afterEdit = await page.evaluate(() => ({ cat: document.activeElement.dataset.cat, value: document.activeElement.value, w: WAMAP.siteRanking.result().weights.access }));
+  assert(midEdit.cat === 'access' && midEdit.value === '152' && midEdit.stored === 15 && afterEdit.cat === 'access' && afterEdit.value === '25' && afterEdit.w === 25,
+    'a re-render waits for a weight being typed, and a committed edit keeps its focus: ' + JSON.stringify([midEdit, afterEdit]));
   await page.locator('#rank-modal button', { hasText: 'Reset weights' }).click();
   rk = await page.evaluate(() => WAMAP.siteRanking.result());
-  assert(rk.weights.demand === 30, 'reset weights from the ranking');
+  assert(rk.weights.demand === 30 && rk.weights.access === 15, 'reset weights from the ranking');
   const rtext = await page.evaluate(() => WAMAP.siteRanking.text()), rcsv = await page.evaluate(() => WAMAP.siteRanking.csv());
   assert(/^Site ranking: Multispecialty or medical office, 10,000 sf building/.test(rtext) && /\n1\. .+: \d+\/100, /.test(rtext) && /Zoning barrier/.test(rtext),
     'the ranking copies as text');
-  assert(/^Criterion,Weight \(%\),/.test(rcsv) && /\r\nOverall score \(of 100\),100,\d+,\d+/.test(rcsv) && rcsv.split('\r\n').length === 1 + 6 + 15 + 3, 'the ranking downloads as CSV, criteria and factors');
-  await page.locator('#rank-modal .rank-name').nth(1).click();
+  assert(/^Criterion,Weight \(%\),/.test(rcsv) && /\r\nOverall score \(of 100\),100,\d+,\d+,\d+/.test(rcsv) &&
+    rcsv.split('\r\n').find(l => l.startsWith('Assessed land value per acre')).split(',').includes(String(Math.round(1200000 / (85600 / 43560)))) &&
+    rcsv.split('\r\n').length === 1 + 6 + 16 + 2 + 3, 'the ranking downloads as CSV: criteria, factors, overlap and land value');
+  assert(/Catchment overlap: \d+% of residents shared with #\d/.test(rtext) && /Assessed land: \$611k per acre/.test(rtext), 'the text copy carries the overlap and land value');
+  await page.locator('#rank-modal select.rank-profile').selectOption('chc');
+  const chcCsv = await page.evaluate(() => { WAMAP.siteRanking.result(); return new Promise(res => requestAnimationFrame(() => res(WAMAP.siteRanking.csv()))); });
+  assert(chcCsv.split('\r\n').length === 1 + 6 + 14 + 2 + 3 && !/Labor market|Employer base/.test(chcCsv), 'the CSV leaves out factors a use type weights at zero (a health center: labor market, employer base)');
+  await page.locator('#rank-modal select.rank-profile').selectOption('multi');
+  // A weight out of range, or emptied, goes back to the value that applies.
+  const dem = page.locator('#rank-modal .rank-win[data-cat="demand"]');
+  await dem.fill('150'); await dem.dispatchEvent('change');
+  await page.waitForTimeout(100);
+  const after150 = [await page.locator('#rank-modal .rank-win[data-cat="demand"]').inputValue(), await page.evaluate(() => WAMAP.siteRanking.result().weights.demand)];
+  await page.locator('#rank-modal .rank-win[data-cat="demand"]').fill(''); await page.locator('#rank-modal .rank-win[data-cat="demand"]').dispatchEvent('change');
+  await page.waitForTimeout(100);
+  const afterEmpty = [await page.locator('#rank-modal .rank-win[data-cat="demand"]').inputValue(), await page.evaluate(() => WAMAP.siteRanking.result().weights.demand)];
+  assert(after150.join() === '30,30' && afterEmpty.join() === '30,30', 'an invalid weight reverts to the one that applies: ' + JSON.stringify([after150, afterEmpty]));
+  const orderNow = (await page.evaluate(() => WAMAP.siteRanking.result())).rows.map(x => x.pinId);
+  await page.locator('#rank-modal .rank-name').nth(orderNow.indexOf(pinIds[1])).click();
   await page.waitForTimeout(400);
   assert(!(await page.locator('#rank-modal').isVisible()) && (await page.evaluate(() => WAMAP.siteEval.pinId)) === pinIds[1], 'a site\'s name opens its evaluation');
   await page.locator('#site-eval .se-rank-btn').click();
   assert(await page.locator('#rank-modal').isVisible(), 'the evaluation panel opens the ranking too');
   await page.keyboard.press('Escape');
-  assert(!(await page.locator('#rank-modal').isVisible()) && await page.locator('#site-eval').isVisible(), 'Escape closes the ranking and leaves the panel open');
+  assert(!(await page.locator('#rank-modal').isVisible()) && await page.locator('#site-eval').isVisible() && await page.evaluate(() => document.activeElement.classList.contains('se-rank-btn')),
+    'Escape closes the ranking, leaves the panel open and returns focus to the button that opened it');
+  // Ranking rules on their own: ties share a rank, unchecked zoning is flagged, and a barrier is worded by what the atlas records.
+  const ranked = await page.evaluate(() => {
+    const z = (status, basis) => ({ id: 'zoning', status, basis });
+    const row = (i, overall, stars, gated, zoning) => ({ i, busy: false, res: { overall, stars, gated, coverage: 100, criteria: [zoning] } });
+    const rows = WAMAP.siteRankingInternals.rankRows([row(0, 70, 3.6, false, z('ok', 'office')), row(1, 80, 4, false, z('error')), row(2, 70, 3.6, false, z('ok', 'office')),
+      row(3, 90, 4.4, true, z('ok', 'class')), row(4, 60, 3, false, z('ok', 'office')), row(5, 20, 1.5, true, z('ok', 'office'))]);
+    return rows.map(r => [r.i, r.rank, r.rankLabel]);
+  });
+  assert(JSON.stringify(ranked) === JSON.stringify([[1, 1, 'Top-ranked site · zoning not verified'], [0, 2, 'Tied: second-ranked site'], [2, 2, 'Tied: second-ranked site'],
+    [4, 4, 'Lower-ranked site'], [3, 5, 'Zoning likely a barrier (uses not recorded for this zone)'], [5, 6, 'Zoning barrier: offices not permitted']]),
+    'ties share a rank and a label, unverified zoning is flagged, and barriers are worded by what the atlas records: ' + JSON.stringify(ranked));
   await page.locator('#site-eval select.se-profile').selectOption('primary');
   await page.locator('#site-eval .se-close').click();
   assert(!(await page.locator('#site-eval').isVisible()) && !(await page.evaluate(() => WAMAP.siteEval.isOpen)), 'the panel closes');
