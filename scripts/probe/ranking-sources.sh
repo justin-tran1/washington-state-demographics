@@ -1,50 +1,57 @@
 #!/usr/bin/env bash
-# Temporary probe: data for the site-ranking framework (growth, age, visit rates).
+# Temporary probe, round 2: NAMCS visit rates by age, OFM tract estimates and county projections.
 set -u
-SF=https://www2.census.gov/programs-surveys/acs/summary_file
-echo "### ACS table-based summary files: which 5-year vintages exist"
-for y in 2019 2020 2021 2022 2023 2024 2025; do
-  code=$(curl -s -o /dev/null -w '%{http_code}' -I "$SF/$y/table-based-SF/data/5YRData/acsdt5y$y-b01003.dat")
-  echo "vintage $y b01003: HTTP $code"
-done
+command -v pdftotext >/dev/null || (sudo apt-get update -qq && sudo apt-get install -y -qq poppler-utils >/dev/null 2>&1)
+echo "### NAMCS 2019: tables with patient age"
+curl -sL -o namcs2019.pdf "https://www.cdc.gov/nchs/data/ahcd/namcs_summary/2019-namcs-web-tables-508.pdf"
+pdftotext -layout namcs2019.pdf namcs2019.txt
+grep -n -E "^Table [0-9]+\." namcs2019.txt | head -40
+echo "--- age rows with rates"
+grep -n -E "(Under 15 years|15[–-]24 years|25[–-]44 years|45[–-]64 years|65[–-]74 years|75 years and over|65 years and over|Under 18|18[–-]44|18[–-]64)" namcs2019.txt | head -40
+echo "--- table containing patient age (first match +40 lines)"
+awk '/Table [0-9]+\..*(age|Age)/{f=1} f{print; n++} n>60{exit}' namcs2019.txt
 echo
-echo "### B01003 2021 vs 2024: WA tract GEOIDs and totals"
-for y in 2021 2024; do
-  curl -s "$SF/$y/table-based-SF/data/5YRData/acsdt5y$y-b01003.dat" | grep -E '^(GEO_ID|1400000US53|0500000US53|0400000US53)' > b01003_$y.txt
-  head -1 b01003_$y.txt
-  echo "$y: tracts $(grep -c '^1400000US53' b01003_$y.txt) counties $(grep -c '^0500000US53' b01003_$y.txt)"
-  grep '^0400000US53' b01003_$y.txt | head -2
-done
-cut -d'|' -f1 b01003_2021.txt | grep '^1400000US53' | sort > g21; cut -d'|' -f1 b01003_2024.txt | grep '^1400000US53' | sort > g24
-echo "tracts in both: $(comm -12 g21 g24 | wc -l); only 2021: $(comm -23 g21 g24 | wc -l); only 2024: $(comm -13 g21 g24 | wc -l)"
-echo "sample King County tracts (2021 vs 2024):"; join -t'|' <(grep '^1400000US53033' b01003_2021.txt | sort | head -5) <(grep '^1400000US53033' b01003_2024.txt | sort) | head -5
+echo "### NHSR 184: age rates"
+curl -sL -o nhsr184.pdf "https://www.cdc.gov/nchs/data/nhsr/nhsr184.pdf"; pdftotext -layout nhsr184.pdf nhsr184.txt
+sed -n '100,140p' nhsr184.txt
+grep -n -E "Under 1|1[–-]17|18[–-]44|45[–-]64|65 and over|75 and over" nhsr184.txt | head -30
 echo
-echo "### B25001 housing units 2021/2024 header"
-for y in 2021 2024; do curl -s "$SF/$y/table-based-SF/data/5YRData/acsdt5y$y-b25001.dat" | head -1 | cut -c1-200; done
+echo "### OFM SAEP tract estimates: workbook structure"
+U=https://ofm.wa.gov/wp-content/uploads/sites/default/files/public/dataresearch/pop/smallarea/data/xlsx
+curl -sL -o saep_tract20.xlsx "$U/saep_tract20.xlsx"; ls -la saep_tract20.xlsx; file saep_tract20.xlsx
+mkdir -p x && cd x && unzip -o -q ../saep_tract20.xlsx && ls -R | head -30
+python3 - <<'PY'
+import re, xml.etree.ElementTree as ET
+ns={'m':'http://schemas.openxmlformats.org/spreadsheetml/2006/main'}
+wb=ET.parse('xl/workbook.xml').getroot()
+print('sheets:', [s.get('name') for s in wb.find('m:sheets',ns)])
+ss=[ ''.join(t.text or '' for t in si.iter('{%s}t'%ns['m'])) for si in ET.parse('xl/sharedStrings.xml').getroot()] 
+import glob
+for sh in sorted(glob.glob('xl/worksheets/sheet*.xml'))[:3]:
+    root=ET.parse(sh).getroot()
+    rows=root.find('m:sheetData',ns)
+    print('==', sh, 'rows', len(rows))
+    for r in list(rows)[:8]:
+        vals=[]
+        for c in r:
+            v=c.find('m:v',ns); t=c.get('t')
+            x=v.text if v is not None else ''
+            if t=='s' and x: x=ss[int(x)]
+            vals.append(x)
+        print(r.get('r'), vals[:24])
+    # find a King County tract row
+    for r in list(rows)[8:4000]:
+        vals=[]
+        for c in r:
+            v=c.find('m:v',ns); t=c.get('t'); x=v.text if v is not None else ''
+            if t=='s' and x: x=ss[int(x)]
+            vals.append(x)
+        if any(str(x).startswith('53033000101') for x in vals): print('sample', vals[:24]); break
+PY
+cd ..
 echo
-echo "### B01001 (sex by age) 2024 header and labels"
-curl -s "$SF/2024/table-based-SF/data/5YRData/acsdt5y2024-b01001.dat" | head -1 | cut -c1-600
-curl -s "https://api.census.gov/data/2024/acs/acs5/groups/B01001.json" | python3 -c "
-import json,sys
-d=json.load(sys.stdin)['variables']
-for k in sorted(d):
-    if k.endswith('E') and k.startswith('B01001_'): print(k, d[k]['label'])
-" | head -60
-echo
-echo "### CDC NAMCS 2019 national summary tables: visit rates by age"
-curl -sL -o namcs2019.pdf "https://www.cdc.gov/nchs/data/ahcd/namcs_summary/2019-namcs-web-tables-508.pdf"; ls -la namcs2019.pdf; file namcs2019.pdf
-command -v pdftotext >/dev/null || (sudo apt-get update -qq && sudo apt-get install -y -qq poppler-utils >/dev/null)
-pdftotext -layout namcs2019.pdf namcs2019.txt 2>&1 | head -3
-grep -n -i -E "Table 1\.|Under 15 years|15–24 years|25–44 years|45–64 years|65–74 years|75 years and over|All visits|15-24|25-44" namcs2019.txt | head -60
-echo "--- Table 1 context"
-awk '/Table 1\./{f=1} f{print; n++} n>45{exit}' namcs2019.txt
-echo
-echo "### NHSR 184 (office visits by age, 2019)"
-curl -sL -o nhsr184.pdf "https://www.cdc.gov/nchs/data/nhsr/nhsr184.pdf"; pdftotext -layout nhsr184.pdf nhsr184.txt 2>/dev/null
-grep -n -i -E "visits per 100|per 100 (people|persons)" nhsr184.txt | head -30
-echo
-echo "### OFM county projections (GMA) page and files"
-curl -sL "https://ofm.wa.gov/washington-data-research/population-demographics/population-forecasts-and-projections/growth-management-act-county-projections" -o ofm_gma.html; ls -la ofm_gma.html
-grep -o -E 'href="[^"]+\.(xlsx|xls|csv|pdf)"' ofm_gma.html | head -20
-curl -sL "https://ofm.wa.gov/washington-data-research/population-demographics/population-estimates/small-area-estimates-program" -o ofm_saep.html; ls -la ofm_saep.html
-grep -o -E 'href="[^"]+\.(xlsx|xls|csv|zip)"' ofm_saep.html | head -30
+echo "### OFM GMA county projections"
+curl -sL "https://ofm.wa.gov/washington-data-research/population-demographics/population-forecasts-and-projections/growth-management-act-county-projections" -o ofm_gma.html
+grep -o -E 'href="[^"]+"' ofm_gma.html | grep -i -E "project|gma|xlsx|forecast" | sort -u | head -40
+curl -sL "https://ofm.wa.gov/washington-data-research/population-demographics/population-forecasts-and-projections" -o ofm_proj.html
+grep -o -E 'href="[^"]+"' ofm_proj.html | grep -i -E "project|county|xlsx" | sort -u | head -40
