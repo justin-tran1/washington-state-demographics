@@ -605,7 +605,8 @@ console.log('· health insurance: payer mix and insurance sources');
     const off = Object.entries(d.rows).filter(([, r]) => r[F.pop] > 0 && AGE.every(f => r[F[f]] != null) && Math.abs(AGE.reduce((a, f) => a + r[F[f]], 0) - 100) > 0.1);
     assert(!off.length && withAges >= (lvl === 'county' ? 39 : 1500), `${lvl} age bands add up to 100% in ${withAges} areas` + (off.length ? ` (${off.length} do not, e.g. ${off[0][0]})` : ''));
   }
-  // Jobs by tract (LEHD LODES), once the build has published them.
+  // Jobs by tract (LEHD LODES).
+  assert(hasData('jobs.json'), 'data/jobs.json is published');
   if (hasData('jobs.json')) {
     const J = readData('jobs.json'), TR = readData('acs/tract.json').rows;
     const rows = Object.entries(J.rows), total = rows.reduce((a, [, r]) => a + r[0], 0), health = rows.reduce((a, [, r]) => a + r[1], 0);
