@@ -196,6 +196,13 @@
         U.el('div', { class: 'popup-actions' }, [
           U.el('button', { class: 'btn mini', text: '🚗 Drive times from here', onclick: () => { WAMAP.driveTime.setOrigin(r.lat, r.lon, r.label.split(',').slice(0, 2).join(',')); map.closePopup(); } }),
           U.el('button', { class: 'btn mini', text: '📌 Keep as pin', onclick: () => { addPin(r.lat, r.lon, r.label.split(',').slice(0, 3).join(',')); map.closePopup(); } }),
+          U.el('button', { class: 'btn mini', text: '🏥 Evaluate for medical use', title: 'Keep this address as a pin and score it for a medical clinic',
+            onclick: () => {
+              const id = addPin(r.lat, r.lon, r.label.split(',').slice(0, 3).join(','));
+              map.closePopup();
+              if (searchMarker) { map.removeLayer(searchMarker); searchMarker = null; }
+              if (WAMAP.siteEval) WAMAP.siteEval.open(id);
+            } }),
           U.el('button', { class: 'btn mini ghost', text: 'Remove marker', onclick: () => { map.removeLayer(searchMarker); searchMarker = null; } })
         ])
       ]);
@@ -209,9 +216,9 @@
 
     // ------------------------------------------------------------- pins
     // Pins keep their id across reloads, so the radius searches drawn around
-    // them (layers/areas.js) find them again. That module follows pins
-    // through WAMAP.pins events: 'move' (id, lat, lon, final), 'remove' (id)
-    // and 'label' (id).
+    // them (layers/areas.js) find them again. That module, the site
+    // evaluation and the ranking follow pins through WAMAP.pins events:
+    // 'add' (id), 'move' (id, lat, lon, final), 'remove' (id) and 'label' (id).
     const pinLayer = L.layerGroup().addTo(map);
     const pins = new Map(); // id -> {marker, data}
     const savedPins = U.store.get('pins') || [];
@@ -219,6 +226,8 @@
     const emitPin = (type, ...args) => { for (const fn of (pinListeners[type] || [])) fn(...args); };
     WAMAP.pins = {
       get(id) { const p = pins.get(id); return p ? p.data : null; },
+      /** Every pin, in the order they were dropped. */
+      list() { return Array.from(pins.values()).map(p => p.data); },
       on(type, fn) { (pinListeners[type] = pinListeners[type] || []).push(fn); }
     };
 
@@ -228,6 +237,12 @@
         U.el('div', { class: 'popup-src', text: data.lat.toFixed(5) + ', ' + data.lon.toFixed(5) }),
         WAMAP.areas ? WAMAP.areas.pinPopupSection(id) : null,
         U.el('div', { class: 'popup-actions' }, [
+          WAMAP.siteEval ? U.el('button', { class: 'btn mini', text: '🏥 Evaluate for medical use',
+            title: 'Score this site for a medical clinic: zoning, parking and site, access, transit, demand, payer mix and more',
+            onclick: () => { map.closePopup(); WAMAP.siteEval.open(id); } }) : null,
+          WAMAP.siteRanking && pins.size > 1 ? U.el('button', { class: 'btn mini', text: '📊 Rank all pins',
+            title: 'Compare and rank every pin on the same weighted criteria',
+            onclick: () => { map.closePopup(); WAMAP.siteRanking.open(); } }) : null,
           U.el('button', { class: 'btn mini', text: '🚗 Drive times from here', onclick: () => { WAMAP.driveTime.setOrigin(data.lat, data.lon, data.label || 'pin'); map.closePopup(); } }),
           U.el('button', { class: 'btn mini ghost', text: '🗑 Remove pin', onclick: () => removePin(id) })
         ])
@@ -262,6 +277,7 @@
       savePins();
       if (!label) labelPin(id, data, lat, lon);
       updatePinCount();
+      emitPin('add', id);
       return id;
     }
     function removePin(id) {
@@ -308,6 +324,7 @@
       map, card: U.$('#card-insurance'),
       profile: WAMAP.insuranceProfile, popupOptions: { maxWidth: 360, minWidth: 300 }
     });
+    layers.zoning = WAMAP.createZoning({ map, card: U.$('#card-zoning') });
     layers.amenities = WAMAP.createAmenities({ map, card: U.$('#card-amenities') });
     layers.transit = WAMAP.createTransit({ map, card: U.$('#card-transit') });
     layers.crime = WAMAP.createCrime({ map, card: U.$('#card-crime') });
@@ -315,6 +332,9 @@
     layers.areas = WAMAP.createAreas({
       map, card: U.$('#card-areas'), amenities: layers.amenities, transit: layers.transit
     });
+    // The medical site evaluation opens from a pin's popup (not a layer card).
+    WAMAP.siteEval = WAMAP.createSiteEval({ map, amenities: layers.amenities, transit: layers.transit });
+    WAMAP.siteRanking = WAMAP.createSiteRanking({ map });
 
     for (const [id, inst] of Object.entries(layers)) {
       const card = U.$('#card-' + id);
@@ -352,6 +372,7 @@
       if (demoSel && demoSel.value !== CFG.DEMO_METRICS[0].id) parts.push('demo=' + demoSel.value);
       const insSel = U.$('#card-insurance select.input');
       if (insSel && insSel.value !== CFG.INSURANCE_METRICS[0].id) parts.push('ins=' + insSel.value);
+      if (layers.zoning.mode === 'office') parts.push('zmode=office');
       const origin = WAMAP.driveTime.getOrigin();
       if (origin) parts.push(`dt=${origin.lat.toFixed(5)},${origin.lon.toFixed(5)}`);
       return '#' + parts.join('&');
@@ -395,6 +416,7 @@
       };
       restoreSelect('demographics', st.demo);
       restoreSelect('insurance', st.ins);
+      if (st.zmode === 'office') layers.zoning.setMode('office');
       if (st.layers) {
         for (const id of st.layers.split(',')) {
           const t = U.$('#card-' + id + ' .card-toggle input');

@@ -31,6 +31,7 @@
   const fmt = {
     int: v => (v == null ? '—' : Math.round(v).toLocaleString('en-US')),
     num1: v => (v == null ? '—' : Number(v).toLocaleString('en-US', { maximumFractionDigits: 1 })),
+    num2: v => (v == null ? '—' : Number(v).toFixed(2)),
     money: v => (v == null ? '—' : '$' + Math.round(v).toLocaleString('en-US')),
     pct1: v => (v == null ? '—' : Number(v).toLocaleString('en-US', { maximumFractionDigits: 1 }) + '%'),
     sqmi: v => (v == null ? '—' : Number(v).toLocaleString('en-US', { maximumFractionDigits: 1 }) + ' sq mi'),
@@ -313,11 +314,18 @@
     },
     async _run(ql, signal) {
       let lastErr;
+      // A request that never answers would hold the queue for everyone behind it.
+      const limitMs = (CFG.OVERPASS.timeoutS + 20) * 1000;
       for (const ep of CFG.OVERPASS.endpoints) {
         if (signal && signal.aborted) throw abortError();
+        const ctl = new AbortController();
+        let timedOut = false;
+        const timer = setTimeout(() => { timedOut = true; ctl.abort(); }, limitMs);
+        const onAbort = () => ctl.abort();
+        if (signal) signal.addEventListener('abort', onAbort, { once: true });
         try {
           const res = await fetch(ep, {
-            method: 'POST', signal,
+            method: 'POST', signal: ctl.signal,
             headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
             body: 'data=' + encodeURIComponent(ql)
           });
@@ -326,7 +334,10 @@
           return await res.json();
         } catch (err) {
           if (signal && signal.aborted) throw abortError();
-          lastErr = err;
+          lastErr = timedOut ? new Error('Overpass did not answer within ' + limitMs / 1000 + ' s') : err;
+        } finally {
+          clearTimeout(timer);
+          if (signal) signal.removeEventListener('abort', onAbort);
         }
       }
       throw lastErr || new Error('All Overpass endpoints failed');

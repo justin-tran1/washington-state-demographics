@@ -3,8 +3,8 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Washington Explorer — demographics, amenities, transit, crime &amp; drive times</title>
-  <meta name="description" content="Interactive Washington state map: ACS demographics and health-insurance choropleths, schools and amenities, statewide transit, city police incident data, and 5/10/15-minute drive-time areas.">
+  <title>Washington Explorer — demographics, zoning, amenities, transit, crime &amp; drive times</title>
+  <meta name="description" content="Interactive Washington state map: ACS demographics and health-insurance choropleths, city and county zoning, schools and amenities, statewide transit, city police incident data, 5/10/15-minute drive-time areas and a medical site evaluation for dropped pins.">
   <link rel="icon" href="data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22><text y=%22.9em%22 font-size=%2290%22>🗺️</text></svg>">
   <!-- Leaflet + plugins from pinned CDN versions, SRI-verified (hashes computed
        from the exact npm tarballs), with jsDelivr fallback for each file. -->
@@ -27,7 +27,7 @@
     <button id="sidebar-toggle" class="icon-btn" aria-label="Toggle panel">☰</button>
     <div class="brand">
       <span class="brand-title">Washington Explorer</span>
-      <span class="brand-sub">demographics · amenities · transit · crime · drive times</span>
+      <span class="brand-sub">demographics · zoning · amenities · transit · crime · drive times · site evaluation</span>
     </div>
     <div id="theme-switch" class="theme-switch" role="group" aria-label="Color theme">
       <button class="theme-btn" data-theme-set="auto" type="button" title="Follow system theme">Auto</button>
@@ -98,6 +98,14 @@
         <div class="layer-card" id="card-insurance">
           <div class="card-head">
             <span class="card-title">🩺 Health insurance <span class="tag">payer mix · ACS</span></span>
+            <label class="card-toggle switch" title="Show/hide"><input type="checkbox"><span class="knob"></span></label>
+          </div>
+          <div class="card-body"></div>
+        </div>
+
+        <div class="layer-card" id="card-zoning">
+          <div class="card-head">
+            <span class="card-title">🏗️ Zoning <span class="tag">city · county</span></span>
             <label class="card-toggle switch" title="Show/hide"><input type="checkbox"><span class="knob"></span></label>
           </div>
           <div class="card-body"></div>
@@ -177,6 +185,9 @@
   <script src="assets/js/layers/crime.js"></script>
   <script src="assets/js/layers/drivetime.js"></script>
   <script src="assets/js/layers/areas.js"></script>
+  <script src="assets/js/layers/zoning.js"></script>
+  <script src="assets/js/layers/siteeval.js"></script>
+  <script src="assets/js/layers/siteranking.js"></script>
   <script src="assets/js/app.js"></script>
 </body>
 </html>
