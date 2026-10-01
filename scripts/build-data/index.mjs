@@ -11,11 +11,13 @@ import { buildAmenities } from './amenities.mjs';
 import { buildTransit } from './transit.mjs';
 import { buildCrime } from './crime.mjs';
 import { buildBoundaries } from './boundaries.mjs';
+import { buildGrowth } from './growth.mjs';
 
 const OUT = new URL('../../data', import.meta.url).pathname;
 
 const STEPS = {
   acs: () => buildACS(OUT),
+  growth: () => buildGrowth(OUT),
   boundaries: () => buildBoundaries(OUT),
   amenities: () => buildAmenities(OUT),
   transit: () => buildTransit(OUT),

@@ -180,13 +180,48 @@ async function insuranceLines(y) {
   return { payer, sources, missing };
 }
 
+// ---- age ------------------------------------------------------------------
+// B01001 (sex by age) in the bands national office-visit rates are published
+// in, for weighting a population by how much care it uses. Lines are
+// identified from their labels; every age line must fall inside one band.
+export const AGE_BANDS = [['age0_14', 0, 14], ['age15_24', 15, 24], ['age25_44', 25, 44],
+  ['age45_64', 45, 64], ['age65_74', 65, 74], ['age75p', 75, Infinity]];
+
+/** "Under 5 years" -> [0, 4]; "18 and 19 years" -> [18, 19]; "85 years and over" -> [85, Infinity]. */
+export function ageRange(label) {
+  const s = String(label).toLowerCase().replace(/\s+/g, ' ').trim();
+  let m;
+  if ((m = s.match(/^under (\d+) years?$/))) return [0, +m[1] - 1];
+  if ((m = s.match(/^(\d+) (?:to|and) (\d+) years?$/))) return [+m[1], +m[2]];
+  if ((m = s.match(/^(\d+) years? and over$/))) return [+m[1], Infinity];
+  if ((m = s.match(/^(\d+) years?$/))) return [+m[1], +m[1]];
+  return null;
+}
+
+/** B01001 leaf lines grouped into AGE_BANDS: { band: [lines] }. */
+export function ageLines(rows) {
+  const out = Object.fromEntries(AGE_BANDS.map(([k]) => [k, []]));
+  const leaves = rows.filter(r => r.leaf && r.line !== '001');
+  for (const r of leaves) {
+    // path: Total > Male|Female > age
+    const range = r.path.length === 3 && /^(male|female)$/i.test(r.path[1]) ? ageRange(r.path[2]) : null;
+    const band = range && AGE_BANDS.find(([, lo, hi]) => range[0] >= lo && range[1] <= hi);
+    if (!band) throw new Error(`B01001_${r.line}E not placed in an age band: "${r.path.join(' > ')}"`);
+    out[band[0]].push(r.line);
+  }
+  if (leaves.length !== 46) throw new Error(`B01001: expected 46 age lines, found ${leaves.length}`);
+  return out;
+}
+
 export const FIELDS = ['pop', 'households', 'medAge', 'medInc', 'perCap', 'medHome', 'medRent',
   'pctBach', 'pctPoverty', 'pctUnemp', 'pctOwner', 'insUniverse', 'pctInsured', 'pctUninsured',
   'aland', 'lat', 'lon',
   // payer mix (B27010, mutually exclusive, % of the universe; pmDual is part of pmMedicaid)
   'pmEmployer', 'pmDirect', 'pmMedicare', 'pmMedicaid', 'pmMilitary', 'pmOther', 'pmDual',
   // insurance sources (B27002, B27003, C27004-C27009: alone or in combination, % of the universe)
-  'srcPrivate', 'srcEmployer', 'srcDirect', 'srcTricare', 'srcPublic', 'srcMedicare', 'srcMedicaid', 'srcVA'];
+  'srcPrivate', 'srcEmployer', 'srcDirect', 'srcTricare', 'srcPublic', 'srcMedicare', 'srcMedicaid', 'srcVA',
+  // age bands (B01001, % of the total population)
+  ...AGE_BANDS.map(([k]) => k)];
 
 /** Newest ACS 5-year vintage whose Summary File directory exists. */
 async function newestVintage() {
@@ -399,7 +434,11 @@ export async function buildACS(outDir) {
   const y = await newestVintage();
   log(`ACS 5-year vintage ${y} (${y - 4}-${y}); source: ${key ? 'Census Data API (keyed)' : 'keyless Summary Files'}`);
   const insLines = await insuranceLines(y);
-  const tables = { ...TABLES, B27010: ['001', ...Object.values(insLines.payer).flat()] };
+  const ages = ageLines(tableLines('B01001', await fetchJSON(META(y, 'B01001')).catch(err => {
+    throw new Error(`B01001 metadata unavailable (${err.message.replace(/key=[^&\s]+/, 'key=***')})`);
+  })));
+  log('B01001 bands: ' + Object.entries(ages).map(([k, ls]) => `${k} ${ls.join('+')}`).join('; '));
+  const tables = { ...TABLES, B27010: ['001', ...Object.values(insLines.payer).flat()], B01001: ['001', ...Object.values(ages).flat()] };
   for (const s of Object.values(insLines.sources)) tables[s.table] = ['001', ...s.with, ...s.no];
 
   // Download tables a few at a time: the Census file server throttles each
@@ -471,9 +510,12 @@ export async function buildACS(outDir) {
         srcTricare: srcPct('srcTricare'), srcPublic: srcPct('srcPublic'), srcMedicare: srcPct('srcMedicare'),
         srcMedicaid: srcPct('srcMedicaid'), srcVA: srcPct('srcVA')
       };
+      const ageT = T('B01001'), ageAll = sumLines(ageT, Object.values(ages).flat());
+      if (ageAll != null && ageT['001'] != null && ageAll !== ageT['001']) mismatch.push(`${g} B01001 ${ageAll}/${ageT['001']}`);
+      for (const [k, ls] of Object.entries(ages)) rec[k] = pct(sumLines(ageT, ls), ageT['001']);
       rows[g] = FIELDS.map(f => rec[f]);
     }
-    if (mismatch.length) throw new Error(`${level}: ${mismatch.length} areas whose insurance lines do not add up, e.g. ${mismatch.slice(0, 3).join('; ')}`);
+    if (mismatch.length) throw new Error(`${level}: ${mismatch.length} areas whose insurance or age lines do not add up, e.g. ${mismatch.slice(0, 3).join('; ')}`);
     // Tract names read "Census Tract 1.01, King County"; counties "King County".
     const nameOf = g => {
       const own = (tiger[level][g] || {}).name || null;
@@ -532,6 +574,18 @@ export async function buildACS(outDir) {
       if (off.length) throw new Error(`implausible statewide insurance shares: ${off.map(([k]) => `${k} ${shares[k]}%`).join(', ')}`);
       const sum = PAYERS.reduce((a, p) => a + state.payer[p], 0);
       if (sum !== state.total) throw new Error(`payer mix covers ${sum} of ${state.total} people`);
+      // Statewide age shares (population-weighted), against wide bounds.
+      const iPop = FIELDS.indexOf('pop');
+      const ageShare = k => {
+        const i = FIELDS.indexOf(k);
+        let n = 0, d = 0;
+        for (const r of vals) if (r[iPop] && r[i] != null) { n += r[iPop] * r[i]; d += r[iPop]; }
+        return d ? round(n / d, 1) : null;
+      };
+      s.statewide.age = Object.fromEntries(AGE_BANDS.map(([k]) => [k, ageShare(k)]));
+      const AB = { age0_14: [12, 25], age15_24: [9, 18], age25_44: [20, 35], age45_64: [18, 32], age65_74: [6, 16], age75p: [3, 12] };
+      const offAge = Object.entries(AB).filter(([k, [lo, hi]]) => !(s.statewide.age[k] >= lo && s.statewide.age[k] <= hi));
+      if (offAge.length) throw new Error(`implausible statewide age shares: ${offAge.map(([k]) => `${k} ${s.statewide.age[k]}%`).join(', ')}`);
     }
     summary[level] = s;
   }

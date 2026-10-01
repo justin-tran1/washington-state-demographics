@@ -177,6 +177,95 @@ export async function unzipText(url, entry) {
   return execFileSync('unzip', ['-p', `${d}/f.zip`, ...(entry ? [entry] : [])], { maxBuffer: 1 << 30 }).toString('latin1');
 }
 
+// ---- .xlsx workbooks (OFM publishes its estimates and projections as Excel only)
+const XML_ENT = { amp: '&', lt: '<', gt: '>', quot: '"', apos: "'" };
+const unXML = s => String(s).replace(/&(#x[0-9a-f]+|#\d+|amp|lt|gt|quot|apos);/gi, (m, e) =>
+  e[0] === '#' ? String.fromCodePoint(e[1] === 'x' || e[1] === 'X' ? parseInt(e.slice(2), 16) : parseInt(e.slice(1), 10)) : XML_ENT[e.toLowerCase()]);
+/** The text of every <t> in a fragment, phonetic runs left out. */
+const xmlText = frag => unXML([...String(frag).replace(/<rPh\b[\s\S]*?<\/rPh>/g, '').matchAll(/<t(?:\s[^>]*)?>([\s\S]*?)<\/t>/g)].map(m => m[1]).join(''));
+
+/** xl/sharedStrings.xml -> [string]. */
+export function parseSharedStrings(xml) {
+  return [...String(xml || '').matchAll(/<si>([\s\S]*?)<\/si>|<si\/>/g)].map(m => (m[1] == null ? '' : xmlText(m[1])));
+}
+
+/** Column letters -> 0-based index ("A" -> 0, "AB" -> 27). */
+const colIndex = letters => [...letters].reduce((n, ch) => n * 26 + ch.charCodeAt(0) - 64, 0) - 1;
+/** 0-based index -> column letters. */
+export const colName = i => (i < 26 ? String.fromCharCode(65 + i) : colName(Math.floor(i / 26) - 1) + String.fromCharCode(65 + (i % 26)));
+
+/**
+ * A worksheet's cells as { rowNumber: { columnLetters: text } }. Values stay
+ * strings (numbers as Excel wrote them); empty cells are left out.
+ */
+export function parseSheet(xml, strings = []) {
+  const rows = {};
+  let nextRow = 1;
+  for (const rm of String(xml || '').matchAll(/<row\b([^>]*?)(?:\/>|>([\s\S]*?)<\/row>)/g)) {
+    const rAttr = rm[1].match(/\br="(\d+)"/);
+    const rowNum = rAttr ? +rAttr[1] : nextRow;
+    nextRow = rowNum + 1;
+    if (rm[2] == null) continue;
+    const cells = {};
+    let nextCol = 0;
+    for (const cm of rm[2].matchAll(/<c\b([^>]*?)(?:\/>|>([\s\S]*?)<\/c>)/g)) {
+      const ref = cm[1].match(/\br="([A-Z]+)\d*"/);
+      const col = ref ? colIndex(ref[1]) : nextCol;
+      nextCol = col + 1;
+      const body = cm[2] || '';
+      const type = (cm[1].match(/\bt="(\w+)"/) || [])[1];
+      const v = (body.match(/<v>([\s\S]*?)<\/v>/) || [])[1];
+      let text;
+      if (type === 's') text = v != null ? strings[+v] : undefined;
+      else if (type === 'inlineStr') text = xmlText(body);
+      else text = v != null ? unXML(v) : undefined;
+      if (text != null && text !== '') cells[colName(col)] = text;
+    }
+    rows[rowNum] = cells;
+  }
+  return rows;
+}
+
+/** Download an .xlsx and read every sheet: [{ name, rows }] in workbook order. */
+export async function readXlsx(url) {
+  const { execFileSync } = await import('node:child_process');
+  const { writeFile, mkdtemp } = await import('node:fs/promises');
+  const { tmpdir } = await import('node:os');
+  const res = await fetchRetry(url, {}, { retries: 2, timeoutMs: 300000 });
+  if (!res.ok) throw new Error(`HTTP ${res.status} for ${url}`);
+  const buf = Buffer.from(await res.arrayBuffer());
+  // A missing file can come back as an HTML page with status 200.
+  if (buf.length < 4 || buf.readUInt32LE(0) !== 0x04034b50) throw new Error(`${url} is not an .xlsx workbook`);
+  const d = await mkdtemp(`${tmpdir()}/xlsx-`);
+  await writeFile(`${d}/f.xlsx`, buf);
+  const part = name => {
+    try { return execFileSync('unzip', ['-p', `${d}/f.xlsx`, name], { maxBuffer: 1 << 30, stdio: ['ignore', 'pipe', 'ignore'] }).toString('utf8'); }
+    catch (e) { return null; }
+  };
+  return readWorkbookParts(part);
+}
+
+/** The workbook's sheets from a reader of its zip members (separate for testing). */
+export function readWorkbookParts(part) {
+  const strings = parseSharedStrings(part('xl/sharedStrings.xml'));
+  const wb = part('xl/workbook.xml'), rels = part('xl/_rels/workbook.xml.rels');
+  if (!wb || !rels) throw new Error('not a workbook (no xl/workbook.xml)');
+  const target = {};
+  for (const m of rels.matchAll(/<Relationship\b([^>]*)\/?>/g)) {
+    const id = (m[1].match(/\bId="([^"]+)"/) || [])[1], t = (m[1].match(/\bTarget="([^"]+)"/) || [])[1];
+    if (id && t) target[id] = t.startsWith('/') ? t.slice(1) : 'xl/' + t.replace(/^\.\//, '');
+  }
+  const sheets = [];
+  for (const m of wb.matchAll(/<sheet\b([^>]*)\/?>/g)) {
+    const name = unXML((m[1].match(/\bname="([^"]*)"/) || [])[1] || '');
+    const rid = (m[1].match(/\br:id="([^"]+)"/) || m[1].match(/\b\w+:id="([^"]+)"/) || [])[1];
+    const xml = rid && target[rid] ? part(target[rid]) : null;
+    if (xml) sheets.push({ name, rows: parseSheet(xml, strings) });
+  }
+  if (!sheets.length) throw new Error('workbook has no readable sheets');
+  return sheets;
+}
+
 /**
  * Parse a Census Gazetteer file into objects keyed by upper-cased header.
  * The files were tab-delimited through 2024 and are pipe-delimited since 2025.

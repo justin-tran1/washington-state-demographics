@@ -216,9 +216,9 @@
 
     // ------------------------------------------------------------- pins
     // Pins keep their id across reloads, so the radius searches drawn around
-    // them (layers/areas.js) find them again. That module follows pins
-    // through WAMAP.pins events: 'move' (id, lat, lon, final), 'remove' (id)
-    // and 'label' (id).
+    // them (layers/areas.js) find them again. That module, the site
+    // evaluation and the ranking follow pins through WAMAP.pins events:
+    // 'add' (id), 'move' (id, lat, lon, final), 'remove' (id) and 'label' (id).
     const pinLayer = L.layerGroup().addTo(map);
     const pins = new Map(); // id -> {marker, data}
     const savedPins = U.store.get('pins') || [];
@@ -226,6 +226,8 @@
     const emitPin = (type, ...args) => { for (const fn of (pinListeners[type] || [])) fn(...args); };
     WAMAP.pins = {
       get(id) { const p = pins.get(id); return p ? p.data : null; },
+      /** Every pin, in the order they were dropped. */
+      list() { return Array.from(pins.values()).map(p => p.data); },
       on(type, fn) { (pinListeners[type] = pinListeners[type] || []).push(fn); }
     };
 
@@ -238,6 +240,9 @@
           WAMAP.siteEval ? U.el('button', { class: 'btn mini', text: '🏥 Evaluate for medical use',
             title: 'Score this site for a medical clinic: zoning, parking and site, access, transit, demand, payer mix and more',
             onclick: () => { map.closePopup(); WAMAP.siteEval.open(id); } }) : null,
+          WAMAP.siteRanking && pins.size > 1 ? U.el('button', { class: 'btn mini', text: '📊 Rank all pins',
+            title: 'Compare and rank every pin on the same weighted criteria',
+            onclick: () => { map.closePopup(); WAMAP.siteRanking.open(); } }) : null,
           U.el('button', { class: 'btn mini', text: '🚗 Drive times from here', onclick: () => { WAMAP.driveTime.setOrigin(data.lat, data.lon, data.label || 'pin'); map.closePopup(); } }),
           U.el('button', { class: 'btn mini ghost', text: '🗑 Remove pin', onclick: () => removePin(id) })
         ])
@@ -272,6 +277,7 @@
       savePins();
       if (!label) labelPin(id, data, lat, lon);
       updatePinCount();
+      emitPin('add', id);
       return id;
     }
     function removePin(id) {
@@ -328,6 +334,7 @@
     });
     // The medical site evaluation opens from a pin's popup (not a layer card).
     WAMAP.siteEval = WAMAP.createSiteEval({ map, amenities: layers.amenities, transit: layers.transit });
+    WAMAP.siteRanking = WAMAP.createSiteRanking({ map });
 
     for (const [id, inst] of Object.entries(layers)) {
       const card = U.$('#card-' + id);

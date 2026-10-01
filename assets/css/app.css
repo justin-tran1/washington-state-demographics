@@ -612,6 +612,94 @@ select.input { cursor: pointer; }
 .se-showmap { padding: 8px 14px 2px; font-size: 12px; }
 .se-foot { padding: 6px 14px 14px; font-size: 11px; color: var(--muted); line-height: 1.45; }
 .se-copy-fallback { position: fixed; left: -9999px; top: 0; }
+/* criteria weights */
+.se-weights { margin: 6px 14px 0; border: 1px solid var(--hairline); border-radius: 8px; font-size: 12.5px; }
+.se-weights > summary { display: flex; justify-content: space-between; gap: 8px; padding: 6px 9px; cursor: pointer; font-weight: 600; }
+.se-wsum { font-weight: 400; color: var(--muted); font-variant-numeric: tabular-nums; }
+.se-wsum.se-wsum-off { color: var(--warning); }
+.se-wgrid { padding: 2px 9px 4px; }
+.se-wrow { display: grid; grid-template-columns: 20px minmax(0, 1fr) 62px 12px; align-items: center; gap: 6px; padding: 2px 0; }
+.se-wname { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.se-win { width: 100%; text-align: right; font-variant-numeric: tabular-nums; }
+.se-wpct { color: var(--muted); font-size: 11px; }
+.se-wfoot { display: flex; justify-content: space-between; align-items: center; gap: 8px; padding: 4px 9px 8px; }
+.se-wfoot .hint { font-size: 11px; }
+/* the six criteria, each holding its factors */
+.se-cat { border-bottom: 1px solid var(--hairline); }
+.se-cat > summary {
+  display: grid; grid-template-columns: 20px minmax(0, 1fr) 34px 24px 92px; align-items: center; gap: 6px;
+  padding: 8px 4px; cursor: pointer; list-style: none; font-size: 13px;
+}
+.se-cat > summary::-webkit-details-marker { display: none; }
+.se-cat > summary:hover { background: var(--plane); }
+.se-catname { display: flex; flex-direction: column; min-width: 0; }
+.se-catname .se-cname { white-space: normal; line-height: 1.25; }
+.se-about { font-size: 11px; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.se-cat.se-off { opacity: .6; }
+.se-catbody { padding: 0 0 6px 18px; }
+.se-catnote { padding: 2px 4px 6px; }
+.se-catbody .se-crit:last-child { border-bottom: 0; }
+.se-grade {
+  display: inline-flex; align-items: center; justify-content: center; width: 22px; height: 22px; border-radius: 50%;
+  font-weight: 800; font-size: 12px; font-variant-numeric: tabular-nums; color: var(--muted); border: 1.5px solid var(--baseline);
+}
+.se-grade.se-g-good { color: var(--good); border-color: var(--good); background: color-mix(in srgb, var(--good) 12%, transparent); }
+.se-grade.se-g-fair { color: var(--warning); border-color: var(--warning); background: color-mix(in srgb, var(--warning) 12%, transparent); }
+.se-grade.se-g-poor { color: var(--critical); border-color: var(--critical); background: color-mix(in srgb, var(--critical) 12%, transparent); }
+.se-glabel { font-size: 11.5px; color: var(--ink-2); text-align: right; white-space: nowrap; font-variant-numeric: tabular-nums; }
+
+/* site ranking */
+.rank-modal .rank-box { max-width: 1180px; }
+.rank-toolbar { display: flex; flex-wrap: wrap; align-items: flex-end; gap: 8px 12px; padding: 10px 18px 6px; }
+.rank-toolbar .se-ctl { flex: 0 1 240px; }
+.rank-toolbar .rank-ctl-sf { flex: 0 1 120px; }
+.rank-actions { display: flex; flex-wrap: wrap; gap: 6px; margin-left: auto; }
+.rank-status { padding: 0 18px 6px; font-size: 12px; color: var(--muted); }
+.rank-body { padding-top: 0; }
+.rank-scroll { overflow-x: auto; border: 1px solid var(--hairline); border-radius: 10px; }
+.rank-table { border-collapse: separate; border-spacing: 0; width: 100%; font-size: 12.5px; }
+.rank-table th, .rank-table td { padding: 8px 10px; border-bottom: 1px solid var(--hairline); vertical-align: top; text-align: left; }
+.rank-table thead th { background: var(--plane); border-bottom: 1px solid var(--baseline); }
+.rank-table tbody tr:last-child > * { border-bottom: 0; }
+.rank-crit { position: sticky; left: 0; z-index: 1; background: var(--surface); min-width: 190px; max-width: 230px; }
+.rank-table thead .rank-crit { background: var(--plane); }
+.rank-crit .rank-ci { margin-right: 6px; }
+.rank-crit .rank-cl { font-weight: 700; color: var(--ink); }
+.rank-crit small { display: block; color: var(--muted); font-weight: 400; margin-left: 22px; }
+.rank-crit > span:last-child { display: inline-block; vertical-align: top; max-width: calc(100% - 26px); }
+.rank-w { white-space: nowrap; color: var(--ink-2); font-variant-numeric: tabular-nums; }
+.rank-w .rank-win { width: 58px; text-align: right; margin-right: 3px; }
+.rank-woff { color: var(--warning); }
+.rank-site { min-width: 150px; }
+.rank-no { font-size: 11px; font-weight: 700; color: var(--muted); }
+.rank-name { all: unset; cursor: pointer; font-weight: 700; color: var(--accent-ink); overflow-wrap: anywhere; }
+.rank-name:hover, .rank-name:focus-visible { text-decoration: underline; }
+.rank-coord { font-size: 11px; color: var(--muted); font-weight: 400; }
+.rank-hscore { margin-top: 4px; font-size: 12px; color: var(--ink-2); font-weight: 600; font-variant-numeric: tabular-nums; }
+.rank-hscore b { font-size: 15px; color: var(--ink); }
+.rank-cell { min-width: 150px; }
+.rank-gline { display: flex; align-items: center; gap: 6px; }
+.rank-glabel { font-weight: 600; color: var(--ink); }
+.rank-bar { height: 6px; border-radius: 3px; background: var(--hairline); overflow: hidden; margin: 6px 0 5px; }
+.rank-bar span { display: block; height: 100%; background: var(--muted); border-radius: 0 3px 3px 0; }
+.rank-cell.se-good .rank-bar span { background: var(--good); }
+.rank-cell.se-fair .rank-bar span { background: var(--warning); }
+.rank-cell.se-poor .rank-bar span { background: var(--critical); }
+.rank-briefs { margin: 0; padding: 0; list-style: none; color: var(--ink-2); font-size: 11.5px; line-height: 1.4; }
+.rank-briefs li { margin: 0 0 2px; }
+.rank-na { color: var(--muted); }
+.rank-off > * { opacity: .55; }
+.rank-total > * { background: var(--plane); }
+.rank-total .rank-crit { background: var(--plane); font-weight: 800; color: var(--ink); }
+.rank-score { font-size: 28px; font-weight: 800; line-height: 1; font-variant-numeric: tabular-nums; color: var(--muted); }
+.rank-total-cell.se-good .rank-score { color: var(--good); }
+.rank-total-cell.se-fair .rank-score { color: var(--warning); }
+.rank-total-cell.se-poor .rank-score { color: var(--critical); }
+.rank-of { font-size: 11px; color: var(--muted); margin-top: 3px; }
+.rank-label { margin-top: 4px; font-weight: 700; color: var(--ink-2); }
+.rank-label.rank-top { color: var(--ink); }
+.rank-note { font-size: 11.5px; color: var(--muted); margin: 10px 0 0; }
+.rank-empty { padding: 18px; color: var(--ink-2); }
 
 /* file:// warning */
 .file-warning {
@@ -654,4 +742,17 @@ select.input { cursor: pointer; }
   .se-panel { top: auto; left: 0; right: 0; bottom: 0; width: auto; max-width: none; max-height: 72vh; border-radius: 12px 12px 0 0; }
   #map-wrap.se-open #legend-host { right: 10px; display: none; }
   #map-wrap.se-open .leaflet-top.leaflet-right { right: 0; }
+  .rank-modal { padding: 8px; }
+  .rank-modal .rank-box { max-height: 94vh; }
+  .rank-toolbar { padding: 8px 12px 4px; }
+  .rank-toolbar .se-ctl { flex: 1 1 160px; }
+  .rank-actions { margin-left: 0; }
+  .rank-status { padding: 0 12px 6px; }
+  .rank-modal .modal-body { padding: 0 12px 12px; }
+  .rank-table th, .rank-table td { padding: 7px 7px; }
+  .rank-crit { min-width: 108px; max-width: 118px; font-size: 12px; }
+  .rank-crit small { display: none; }
+  .rank-crit .rank-ci { display: none; }
+  .rank-w .rank-win { width: 46px; }
+  .rank-cell, .rank-site { min-width: 136px; }
 }
